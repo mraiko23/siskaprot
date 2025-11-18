@@ -227,6 +227,38 @@ function deleteCommand(commandName) {
     return false;
 }
 
+// Helper to send command results (supports string or {text, options})
+async function sendCommandResult(chatId, result) {
+    if (!result) return;
+    if (typeof result === 'string') {
+        await bot.sendMessage(chatId, result);
+        return;
+    }
+    if (typeof result === 'object' && result !== null) {
+        const text = result.text || '';
+        const options = result.options || result;
+        await bot.sendMessage(chatId, text, options);
+        return;
+    }
+    await bot.sendMessage(chatId, String(result));
+}
+
+// Register default /start command if none provided
+if (!customCommands.has('start')) {
+    registerCommand('start', async (chatId) => {
+        const keyboard = [
+            [{ text: '📚 Меню команд', callback_data: 'menu_commands' }]
+        ];
+        return {
+            text: '🤖 *Привет!*\n\nДобро пожаловать. Нажми кнопку ниже, чтобы открыть меню с доступными командами.',
+            options: {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: keyboard }
+            }
+        };
+    });
+}
+
 // Stop and cleanup bots that use a specific token
 function stopBotsByToken(token) {
     const reports = [];
@@ -538,7 +570,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                         } catch (_) {}
                     }
                 });
-
+                
                 runningBots.set(botId, { bot: newBot, code, token });
                 
                 // Execute bot code with proper bot instance in sandbox
@@ -625,8 +657,31 @@ bot.on('message', async (msg) => {
     
     if (!text) return;
     
-    // Handle /start
+    // Handle /start — if a custom /start command exists, call it; otherwise send default message
     if (text === '/start') {
+        if (customCommands.has('start')) {
+            try {
+                const handler = customCommands.get('start');
+                const result = await handler(chatId, '', msg);
+                if (result) {
+                    if (typeof result === 'string') {
+                        await bot.sendMessage(chatId, result, { parse_mode: 'Markdown' });
+                    } else if (result && typeof result === 'object') {
+                        const textToSend = result.text || '';
+                        const options = result.options || result;
+                        await bot.sendMessage(chatId, textToSend, options);
+                    } else {
+                        await bot.sendMessage(chatId, String(result));
+                    }
+                }
+            } catch (e) {
+                console.error('[START HANDLER ERROR]', e);
+                await bot.sendMessage(chatId, '❌ Ошибка в обработчике /start: ' + e.message);
+            }
+            return;
+        }
+
+        // Default /start behaviour
         bot.sendMessage(chatId, 
             '🤖 *Привет! Я автономный AI Sherlock*\n\n' +
             '🔥 *Я САМ пишу себе код - не нужны команды!*\n\n' +
@@ -661,7 +716,12 @@ bot.on('message', async (msg) => {
                 const handler = customCommands.get(cmdName);
                 const result = await handler(chatId, cmdArgs, msg);
                 if (result) {
-                    bot.sendMessage(chatId, String(result));
+                    try {
+                        await sendCommandResult(chatId, result);
+                    } catch (e) {
+                        // fallback
+                        await bot.sendMessage(chatId, String(result));
+                    }
                 }
                 return;
             } catch (error) {
@@ -722,12 +782,24 @@ bot.on('photo', async (msg) => {
         const photo = msg.photo[msg.photo.length - 1];
         const file = await bot.getFile(photo.file_id);
         const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
-        
+
+        // Try to download the image bytes and include them as base64 so OpenRouter receives the file itself.
+        // If download fails, fall back to sending the image URL.
+        let imageBase64 = null;
+        try {
+            const imgResp = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+            imageBase64 = Buffer.from(imgResp.data, 'binary').toString('base64');
+        } catch (e) {
+            console.warn('Could not download image, falling back to URL:', e.message);
+        }
+
         const userMessage = {
             role: 'user',
             content: [
                 { type: 'text', text: caption },
-                { type: 'image_url', image_url: { url: fileUrl } }
+                imageBase64
+                    ? { type: 'image_base64', filename: path.basename(file.file_path), data: imageBase64, mime_type: 'image/jpeg' }
+                    : { type: 'image_url', image_url: { url: fileUrl } }
             ]
         };
         
@@ -763,6 +835,63 @@ bot.on('polling_error', (error) => {
     // Ignore common polling errors to reduce noise
     if (error.code !== 'ETELEGRAM') {
         console.error('Polling error:', error.code);
+    }
+});
+
+// Handle callback queries for inline menus
+bot.on('callback_query', async (query) => {
+    try {
+        const data = query.data;
+        const chatId = query.message.chat.id;
+        const msgId = query.message.message_id;
+
+        if (data === 'menu_commands') {
+            // build buttons for each command
+            const buttons = [];
+            for (const [name] of customCommands) {
+                buttons.push([{ text: `/${name}`, callback_data: `run_cmd:${name}` }]);
+            }
+            // add back button
+            buttons.push([{ text: '🔙 Назад', callback_data: 'menu_main' }]);
+            const text = '📚 Доступные команды:';
+            try {
+                await bot.editMessageText(text, { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: buttons } });
+            } catch (e) {
+                await bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: buttons } });
+            }
+            await bot.answerCallbackQuery(query.id);
+            return;
+        }
+
+        if (data === 'menu_main') {
+            const keyboard = [[{ text: '📚 Меню команд', callback_data: 'menu_commands' }]];
+            const text = '🤖 Главное меню';
+            try {
+                await bot.editMessageText(text, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+            } catch (e) {
+                await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+            }
+            await bot.answerCallbackQuery(query.id);
+            return;
+        }
+
+        if (data && data.startsWith('run_cmd:')) {
+            const cmd = data.split(':')[1];
+            if (customCommands.has(cmd)) {
+                try {
+                    const res = await customCommands.get(cmd)(chatId, '', query);
+                    await sendCommandResult(chatId, res);
+                } catch (e) {
+                    await bot.sendMessage(chatId, `❌ Ошибка выполнения /${cmd}: ${e.message}`);
+                }
+            } else {
+                await bot.sendMessage(chatId, 'Команда не найдена');
+            }
+            await bot.answerCallbackQuery(query.id);
+            return;
+        }
+    } catch (err) {
+        console.error('Callback error:', err);
     }
 });
 
