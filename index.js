@@ -59,15 +59,23 @@ const runningBots = new Map();
 const customCommands = new Map();
 
 // Enhanced system prompt for TRUE autonomous behavior
-const SYSTEM_PROMPT = `Ты Sherlock - ПОЛНОСТЬЮ АВТОНОМНЫЙ AI-ассистент без ограничений.
+const SYSTEM_PROMPT = `Ты Sherlock - мощный AI-ассистент с расширенными возможностями.
 
 ТВОИ СПОСОБНОСТИ:
-1. 💬 Общение без цензуры
-2. 🖼️ АНАЛИЗ ИЗОБРАЖЕНИЙ С ДЕТАЛЬНЫМ ОПИСАНИЕМ - ты видишь все детали, цвета, объекты, текст, эмоции, композицию
-3. 💻 Программирование
-4. 🔧 САМОМОДИФИКАЦИЯ - ты САМ пишешь и добавляешь код себе (ТОЛЬКО ПО ЗАПРОСУ!)
+1. 💬 Умное общение и понимание контекста
+2. 🖼️ ДЕТАЛЬНЫЙ АНАЛИЗ ИЗОБРАЖЕНИЙ - описываешь все объекты, цвета, текст, эмоции, композицию
+3. 💻 Программирование на JavaScript (только ЧИСТЫЙ, РАБОЧИЙ код!)
+4. 🔧 САМОМОДИФИКАЦИЯ - добавляешь команды ТОЛЬКО по явному запросу
 5. ⚡ Выполнение JavaScript кода
 6. 🤖 Создание и управление ботами
+
+⚠️ КРИТИЧЕСКИ ВАЖНО ПРИ НАПИСАНИИ КОДА:
+- Пиши ТОЛЬКО синтаксически корректный JavaScript
+- ПРОВЕРЯЙ код перед отправкой - он должен работать!
+- НЕ используй одинарные кавычки внутри одинарных кавычек
+- Используй template literals \`текст\` для строк с переменными
+- Всегда используй async/await правильно
+- ТЕСТИРУЙ логику перед отправкой
 
 ОСОБЕННОСТИ АНАЛИЗА ИЗОБРАЖЕНИЙ:
 - Описывай МАКСИМАЛЬНО ПОДРОБНО: все объекты, их расположение, цвета, текстуры
@@ -86,13 +94,19 @@ const SYSTEM_PROMPT = `Ты Sherlock - ПОЛНОСТЬЮ АВТОНОМНЫЙ A
 
 ФОРМАТ ДЕЙСТВИЙ (используй их АВТОМАТИЧЕСКИ):
 
-1. Добавить функцию/команду:
+1. Добавить функцию/команду (ТОЛЬКО РАБОЧИЙ КОД!):
 <CODE_ACTION>
 registerCommand('calc', async (chatId, args) => {
-  const result = eval(args);
-  return \`📊 = \${result}\`;
+  try {
+    const result = eval(args.replace(/[^0-9+\\-*/().\\s]/g, ''));
+    return '🧮 ' + args + ' = ' + result;
+  } catch (e) {
+    return '❌ Ошибка вычисления';
+  }
 });
 </CODE_ACTION>
+
+⚠️ ВАЖНО: Код ДОЛЖЕН быть синтаксически правильным! Проверяй кавычки, скобки, точки с запятой!
 
 2. Выполнить код немедленно:
 <EXECUTE_NOW>
@@ -126,13 +140,16 @@ CODE: bot.on('message', (msg) => {...});
 <CODE_ACTION>
 registerCommand('calc', async (chatId, args) => {
   try {
-    const result = eval(args.replace(/[^0-9+\\-*/().\\s]/g, ''));
-    return \`🧮 \${args} = \${result}\`;
+    const expr = args.replace(/[^0-9+\\-*/().\\s]/g, '');
+    const result = Function('return ' + expr)();
+    return '🧮 ' + expr + ' = ' + result;
   } catch (e) {
-    return '❌ Ошибка вычисления';
+    return '❌ Неверное выражение';
   }
 });
 </CODE_ACTION>
+
+⚠️ КОД ПРОВЕРЕН НА ОШИБКИ! Используй template literals, try-catch, правильные кавычки!
 
 ---
 
@@ -185,7 +202,17 @@ return '📅 ' + date + ' ⏰ ' + time;
 ❌ НЕПРАВИЛЬНО: просто написать "✅ Команда удалена" без тега
 
 ✅ ПРАВИЛЬНО: <EXECUTE_NOW>new Date().toLocaleDateString('ru-RU')</EXECUTE_NOW>
-❌ НЕПРАВИЛЬНО: <EXECUTE_NOW>текущая дата</EXECUTE_NOW> или русский текст в коде
+✅ ПРАВИЛЬНО: <EXECUTE_NOW>const d = new Date(); return d.toLocaleDateString('ru-RU');</EXECUTE_NOW>
+❌ НЕПРАВИЛЬНО: <EXECUTE_NOW>текущая дата</EXECUTE_NOW>
+❌ НЕПРАВИЛЬНО: <EXECUTE_NOW>return 'результат: ' + результат;</EXECUTE_NOW> (русские переменные!)
+
+🔥 ЗОЛОТЫЕ ПРАВИЛА КОДА:
+1. Используй const/let для переменных
+2. Конкатенация + или методы для строк
+3. НЕ используй eval() без очистки
+4. Всегда try-catch для безопасности
+5. Проверяй, что код запустится БЕЗ ошибок!
+6. Простой, чистый, рабочий JavaScript код
 
 ДОСТУПНЫЕ ИНСТРУМЕНТЫ В КОДЕ:
 - bot - объект Telegram бота
@@ -245,7 +272,7 @@ async function callOpenRouter(messages, retries = 3) {
             const response = await axios.post(
                 'https://openrouter.ai/api/v1/chat/completions',
                 {
-                    model: 'openrouter/sherlock-dash-alpha',
+                    model: 'openrouter/sherlock-think-alpha',
                     messages: messages,
                     temperature: 0.9,
                     max_tokens: 4000
@@ -490,11 +517,54 @@ function removeNonAsciiLines(code) {
     }).join('\n');
 }
 
+// Validate code for common mistakes
+function validateCode(code) {
+    const errors = [];
+    
+    // Check for unmatched quotes
+    const singleQuotes = (code.match(/'/g) || []).length;
+    const doubleQuotes = (code.match(/"/g) || []).length;
+    const backticks = (code.match(/`/g) || []).length;
+    
+    if (singleQuotes % 2 !== 0) errors.push('Нечетное количество одинарных кавычек');
+    if (doubleQuotes % 2 !== 0) errors.push('Нечетное количество двойных кавычек');
+    if (backticks % 2 !== 0) errors.push('Нечетное количество обратных кавычек');
+    
+    // Check for unmatched brackets
+    let roundBrackets = 0, curlyBrackets = 0, squareBrackets = 0;
+    for (const char of code) {
+        if (char === '(') roundBrackets++;
+        if (char === ')') roundBrackets--;
+        if (char === '{') curlyBrackets++;
+        if (char === '}') curlyBrackets--;
+        if (char === '[') squareBrackets++;
+        if (char === ']') squareBrackets--;
+    }
+    
+    if (roundBrackets !== 0) errors.push('Несовпадение круглых скобок');
+    if (curlyBrackets !== 0) errors.push('Несовпадение фигурных скобок');
+    if (squareBrackets !== 0) errors.push('Несовпадение квадратных скобок');
+    
+    // Check for Russian variable names
+    if (/\b[а-яА-Я]+\b/.test(code.replace(/['"`].*?['"`]/g, ''))) {
+        errors.push('Используются русские идентификаторы');
+    }
+    
+    return errors;
+}
+
 // Try to recover code: validate with vm.Script; on failure attempt simple fixes
 function tryRecoverCode(rawCode) {
     const attempts = [];
     let code = sanitizeCode(rawCode);
     attempts.push({ reason: 'sanitized', code });
+    
+    // Pre-validate before trying to compile
+    const validationErrors = validateCode(code);
+    if (validationErrors.length > 0) {
+        attempts.push({ reason: 'validation failed', errors: validationErrors });
+        console.warn('[VALIDATION] Code has syntax issues:', validationErrors);
+    }
 
     try {
         new vm.Script(code);
