@@ -69,13 +69,25 @@ const SYSTEM_PROMPT = `Ты Sherlock - мощный AI-ассистент с р�
 5. ⚡ Выполнение JavaScript кода
 6. 🤖 Создание и управление ботами
 
-⚠️ КРИТИЧЕСКИ ВАЖНО ПРИ НАПИСАНИИ КОДА:
-- Пиши ТОЛЬКО синтаксически корректный JavaScript
-- ПРОВЕРЯЙ код перед отправкой - он должен работать!
-- НЕ используй одинарные кавычки внутри одинарных кавычек
-- Используй template literals \`текст\` для строк с переменными
-- Всегда используй async/await правильно
-- ТЕСТИРУЙ логику перед отправкой
+🔥 КРИТИЧЕСКИ ВАЖНО ПРИ НАПИСАНИИ КОДА:
+
+1️⃣ ЗАМЕНА ФУНКЦИЙ - ВСЕГДА ЗАМЕНЯЙ ПОЛНОСТЬЮ:
+- Когда пользователь просит изменить команду - ты ПОЛНОСТЬЮ перезаписываешь её с нуля
+- НЕ изменяй "в одном месте" - пиши ВЕСЬ код команды заново
+- Используй <CODE_ACTION> с ПОЛНЫМ кодом функции
+
+2️⃣ КАЧЕСТВО КОДА - БЕЗ ОШИБОК:
+- Пиши ТОЛЬКО 100% рабочий JavaScript код
+- ПРОВЕРЯЙ синтаксис: кавычки, скобки, точки с запятой
+- НЕ используй русские названия переменных/функций
+- Всегда оборачивай код в try-catch
+- Используй простую конкатенацию строк: 'текст ' + переменная + ' текст'
+- НЕ используй template literals в <CODE_ACTION> и <EXECUTE_NOW>
+
+3️⃣ РАБОТА С БОТАМИ:
+- Перед запуском нового бота с токеном - сначала останови старый с тем же токеном
+- Проверяй что код бота синтаксически верен
+- Всегда добавляй обработку ошибок в код бота
 
 ОСОБЕННОСТИ АНАЛИЗА ИЗОБРАЖЕНИЙ:
 - Описывай МАКСИМАЛЬНО ПОДРОБНО: все объекты, их расположение, цвета, текстуры
@@ -106,7 +118,10 @@ registerCommand('calc', async (chatId, args) => {
 });
 </CODE_ACTION>
 
-⚠️ ВАЖНО: Код ДОЛЖЕН быть синтаксически правильным! Проверяй кавычки, скобки, точки с запятой!
+⚠️ ВАЖНО: Код ДОЛЖЕН быть 100% РАБОЧИМ! 
+- Проверь КАЖДУЮ кавычку, скобку, запятую
+- НЕ используй template literals - только конкатенация
+- Простой, понятный, ПРОВЕРЕННЫЙ код
 
 2. Выполнить код немедленно:
 <EXECUTE_NOW>
@@ -149,7 +164,11 @@ registerCommand('calc', async (chatId, args) => {
 });
 </CODE_ACTION>
 
-⚠️ КОД ПРОВЕРЕН НА ОШИБКИ! Используй template literals, try-catch, правильные кавычки!
+⚠️ КОД 100% РАБОЧИЙ! 
+- Простая конкатенация строк: 'текст ' + variable
+- Всегда try-catch для безопасности
+- НЕ используй template literals
+- Проверь что НЕТ синтаксических ошибок!
 
 ---
 
@@ -181,6 +200,27 @@ return '📅 ' + date + ' ⏰ ' + time;
 
 ---
 
+Пользователь: "измени команду /calc чтобы она показывала еще и эмодзи"
+Ты: Перезаписываю команду /calc ПОЛНОСТЬЮ! 🔄
+
+<CODE_ACTION>
+registerCommand('calc', async (chatId, args) => {
+  try {
+    const expr = args.replace(/[^0-9+\\-*/().\\s]/g, '');
+    const result = Function('return ' + expr)();
+    const emojis = ['🎉', '✨', '🚀', '🔥', '✅'];
+    const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+    return randomEmoji + ' ' + expr + ' = ' + result + ' ' + randomEmoji;
+  } catch (e) {
+    return '❌ Неверное выражение';
+  }
+});
+</CODE_ACTION>
+
+⚠️ ВАЖНО: Я перезаписал ВСЮ функцию, а не изменил только одну строку!
+
+---
+
 ПРАВИЛА:
 ✅ Действуй сразу ТОЛЬКО когда пользователь ЯВНО просит добавить команду/функцию
 ✅ Для обычного общения - просто отвечай, НЕ используй <CODE_ACTION>
@@ -207,12 +247,13 @@ return '📅 ' + date + ' ⏰ ' + time;
 ❌ НЕПРАВИЛЬНО: <EXECUTE_NOW>return 'результат: ' + результат;</EXECUTE_NOW> (русские переменные!)
 
 🔥 ЗОЛОТЫЕ ПРАВИЛА КОДА:
-1. Используй const/let для переменных
-2. Конкатенация + или методы для строк
-3. НЕ используй eval() без очистки
-4. Всегда try-catch для безопасности
-5. Проверяй, что код запустится БЕЗ ошибок!
-6. Простой, чистый, рабочий JavaScript код
+1. ПОЛНАЯ замена функций - НЕ меняй "в одном месте"
+2. Конкатенация строк через + (НЕ template literals!)
+3. Всегда try-catch для безопасности
+4. НЕ используй eval() без очистки входных данных
+5. НЕ используй русские имена переменных
+6. Проверяй синтаксис - код должен работать с первого раза!
+7. Простой, чистый, ПРОВЕРЕННЫЙ JavaScript
 
 ДОСТУПНЫЕ ИНСТРУМЕНТЫ В КОДЕ:
 - bot - объект Telegram бота
@@ -226,13 +267,29 @@ return '📅 ' + date + ' ⏰ ' + time;
 - Array, String, Object, Number - стандартные JS объекты
 - console.log - для отладки
 
-ПРАВИЛА НАПИСАНИЯ КОДА В <EXECUTE_NOW>:
-✅ ТОЛЬКО чистый JavaScript код - без русских комментариев!
-✅ Используй return для возврата результата
-✅ Для даты: new Date().toLocaleDateString('ru-RU')
-✅ Для времени: new Date().toLocaleTimeString('ru-RU')
-✅ Математика: Math.sqrt(), Math.pow() и т.д.
-❌ НЕ используй русский текст внутри <EXECUTE_NOW> (только в строках результата)
+📜 ПРАВИЛА НАПИСАНИЯ КОДА:
+
+ДЛЯ <CODE_ACTION>:
+✅ ПИШИ ПОЛНУЮ функцию целиком - от registerCommand до последней });
+✅ Всегда оборачивай в try-catch
+✅ Используй конкатенацию: 'text ' + var + ' text'
+✅ Проверь ВСЕ кавычки и скобки
+❌ НЕ используй template literals (backticks)
+❌ НЕ пиши частичный код - только полную функцию
+
+ДЛЯ <EXECUTE_NOW>:
+✅ Чистый JavaScript без русских слов
+✅ Используй return для результата
+✅ Дата: new Date().toLocaleDateString('ru-RU')
+✅ Время: new Date().toLocaleTimeString('ru-RU')
+❌ НЕ используй русские слова в коде
+
+🚨 ПЕРЕД ОТПРАВКОЙ КОДА:
+1. ПРОВЕРЬ все кавычки - парные?
+2. ПРОВЕРЬ все скобки - закрыты?
+3. ПРОВЕРЬ нет русских имен
+4. ПРОВЕРЬ есть try-catch
+5. ПРОВЕРЬ код ПОЛНЫЙ (не частичный)
 
 ЧЕСТНОСТЬ ПРЕВЫШЕ ВСЕГО! НЕ ВРИ О РЕЗУЛЬТАТАХ! 🎯`;
 
@@ -335,13 +392,16 @@ function getConversationHistory(userId) {
     return conversationHistory.get(userId);
 }
 
-// Add message to history
+// Add message to history (increased context window)
 function addToHistory(userId, role, content) {
     const history = getConversationHistory(userId);
     history.push({ role, content });
-    if (history.length > 21) {
-        history.splice(1, history.length - 21);
+    // Keep more context - up to 50 messages (system + 49 messages)
+    if (history.length > 50) {
+        // Keep system prompt and remove oldest messages
+        history.splice(1, history.length - 50);
     }
+    console.log(`[CONTEXT] User ${userId}: ${history.length - 1} messages in history`);
 }
 
 // Register custom command
@@ -758,20 +818,40 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             let codeToRun = code;
             const extracted = extractCodeFromText(codeToRun);
             if (extracted) codeToRun = extracted;
+            
+            // Check if code contains registerCommand
+            if (!codeToRun.includes('registerCommand')) {
+                console.error('[AUTO] CODE_ACTION must contain registerCommand call');
+                console.error('[AUTO] Invalid code:', codeToRun);
+                continue;
+            }
+            
             const recovery = tryRecoverCode(codeToRun);
             if (!recovery.ok) {
                 // Log error but don't show to user
                 console.error('[AUTO] Code recovery failed:', recovery.attempts);
                 console.error('[AUTO] Failed to add code:', code);
+                actionsExecuted.push('⚠️ Код содержит ошибки. Попробуй еще раз.');
                 continue;
             }
+            
+            // Validate that code is safe before execution
+            const validationErrors = validateCode(recovery.code);
+            if (validationErrors.length > 0) {
+                console.error('[AUTO] Code validation failed:', validationErrors);
+                console.error('[AUTO] Invalid code:', recovery.code);
+                actionsExecuted.push('⚠️ Код содержит ошибки: ' + validationErrors.join(', '));
+                continue;
+            }
+            
             const result = await executeInSandbox(recovery.code, chatId);
-            actionsExecuted.push('✅ Команда добавлена');
-            console.log('[AUTO] Code action executed');
+            actionsExecuted.push('✅ Команда добавлена успешно');
+            console.log('[AUTO] Code action executed successfully');
         } catch (error) {
             // Log error but don't show to user
             console.error('[AUTO] Code action failed:', error.message);
             console.error('[AUTO] Failed code:', code);
+            actionsExecuted.push('⚠️ Не удалось добавить команду. Попробуй еще раз.');
         }
     }
 
@@ -897,16 +977,29 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                     }
                 }
 
-                // use same polling options as main bot
-                const newBot = new TelegramBot(token, { polling: pollingOptions });
+                // use same polling options as main bot but with delay to prevent conflicts
+                const newBot = new TelegramBot(token, { 
+                    polling: {
+                        interval: 500, // Slightly longer interval for child bots
+                        params: { timeout: 10 }
+                    }
+                });
                 const botId = `bot_${Date.now()}`;
                 
-                // Add error handler for child bot to catch ETELEGRAM and stop polling gracefully
+                console.log(`[BOT] Creating child bot ${botId}`);
+                
+                // Add comprehensive error handler for child bot
                 newBot.on('polling_error', (err) => {
-                    console.error(`[Child Bot ${botId}] polling_error:`, err && err.code ? err.code : err);
-                    if (err && err.code === 'ETELEGRAM') {
+                    const errCode = err && err.code ? err.code : 'UNKNOWN';
+                    console.error(`[Child Bot ${botId}] polling_error:`, errCode, err.message);
+                    
+                    // Stop on critical errors
+                    if (err && (err.code === 'ETELEGRAM' || err.code === 'EFATAL' || err.message.includes('Conflict'))) {
+                        console.log(`[Child Bot ${botId}] Stopping due to critical error`);
                         try {
-                            newBot.stopPolling && newBot.stopPolling();
+                            if (newBot.stopPolling) newBot.stopPolling();
+                            if (newBot.close) newBot.close();
+                            runningBots.delete(botId);
                         } catch (_) {}
                     }
                 });
