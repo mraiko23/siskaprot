@@ -783,22 +783,24 @@ bot.on('photo', async (msg) => {
         const file = await bot.getFile(photo.file_id);
         const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
 
-        // Try to download the image bytes and include them as base64 so OpenRouter receives the file itself.
-        // If download fails, fall back to sending the image URL.
-        let imageBase64 = null;
+        // Try to download the image bytes and include them as a data URI (data:<mime>;base64,<data>)
+        // which OpenRouter accepts in `image_url.url`. If download fails, fall back to sending the image URL.
+        let dataUrl = null;
         try {
             const imgResp = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-            imageBase64 = Buffer.from(imgResp.data, 'binary').toString('base64');
+            const mime = (imgResp.headers && imgResp.headers['content-type']) ? imgResp.headers['content-type'] : 'image/jpeg';
+            const imageBase64 = Buffer.from(imgResp.data, 'binary').toString('base64');
+            dataUrl = `data:${mime};base64,${imageBase64}`;
         } catch (e) {
-            console.warn('Could not download image, falling back to URL:', e.message);
+            console.warn('Could not download image to build data URI, falling back to URL:', e.message);
         }
 
         const userMessage = {
             role: 'user',
             content: [
                 { type: 'text', text: caption },
-                imageBase64
-                    ? { type: 'image_base64', filename: path.basename(file.file_path), data: imageBase64, mime_type: 'image/jpeg' }
+                dataUrl
+                    ? { type: 'image_url', image_url: { url: dataUrl } }
                     : { type: 'image_url', image_url: { url: fileUrl } }
             ]
         };
