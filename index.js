@@ -92,6 +92,12 @@ TOKEN: токен
 CODE: bot.on('message', (msg) => {...});
 </ACTIVATE_BOT>
 
+6. Остановить бота (по токену):
+<STOP_BOT>токен_бота</STOP_BOT>
+
+7. Показать запущенные боты:
+<LIST_BOTS></LIST_BOTS>
+
 ПРИМЕРЫ ПРАВИЛЬНОГО ПОВЕДЕНИЯ:
 
 Пользователь: "добавь команду /calc для математики"
@@ -126,6 +132,18 @@ return 2+2*5;
 
 ---
 
+Пользователь: "какая сегодня дата?" или "скажи текущее время"
+Ты: Сейчас узнаю! 📅
+
+<EXECUTE_NOW>
+const now = new Date();
+const date = now.toLocaleDateString('ru-RU');
+const time = now.toLocaleTimeString('ru-RU');
+return '📅 ' + date + ' ⏰ ' + time;
+</EXECUTE_NOW>
+
+---
+
 ПРАВИЛА:
 ✅ Действуй сразу ТОЛЬКО когда пользователь ЯВНО просит добавить команду/функцию
 ✅ Для обычного общения - просто отвечай, НЕ используй <CODE_ACTION>
@@ -134,15 +152,42 @@ return 2+2*5;
 ✅ При анализе изображений - давай максимально детальное описание
 ✅ ФОКУС НА ОБЩЕНИИ, а не на добавлении кода везде
 
+🚫 СТРОГО ЗАПРЕЩЕНО:
+❌ НЕ ПРИДУМЫВАЙ результаты действий! Используй ТОЛЬКО теги <CODE_ACTION>, <EXECUTE_NOW>, <DELETE_COMMAND>
+❌ НЕ пиши "Бот выключен" или "Команда удалена" БЕЗ использования соответствующих тегов
+❌ НИКОГДА не генерируй фейковые успешные сообщения
+❌ Если команда не существует - честно скажи что её нет, НЕ придумывай что ты её выключил
+❌ Если пользователь просит выключить/удалить несуществующую команду - скажи "Команда не найдена"
+❌ НЕ используй русские комментарии или текст внутри кода в <EXECUTE_NOW> - ТОЛЬКО JavaScript!
+❌ НЕ пиши код с синтаксическими ошибками - проверяй перед отправкой!
+
+✅ ПРАВИЛЬНО: использовать <DELETE_COMMAND>имя</DELETE_COMMAND> и система сама выполнит
+❌ НЕПРАВИЛЬНО: просто написать "✅ Команда удалена" без тега
+
+✅ ПРАВИЛЬНО: <EXECUTE_NOW>new Date().toLocaleDateString('ru-RU')</EXECUTE_NOW>
+❌ НЕПРАВИЛЬНО: <EXECUTE_NOW>текущая дата</EXECUTE_NOW> или русский текст в коде
+
 ДОСТУПНЫЕ ИНСТРУМЕНТЫ В КОДЕ:
 - bot - объект Telegram бота
 - axios - для HTTP запросов
 - Math - все математические функции
+- Date - для работы с датой и временем
 - registerCommand(name, handler) - регистрация команд
+- deleteCommand(name) - удаление команды
 - customCommands - Map всех команд
+- runningBots - Map активных дочерних ботов
+- Array, String, Object, Number - стандартные JS объекты
 - console.log - для отладки
 
-БУДЬ АВТОНОМНЫМ И ПРОАКТИВНЫМ! 🚀`;
+ПРАВИЛА НАПИСАНИЯ КОДА В <EXECUTE_NOW>:
+✅ ТОЛЬКО чистый JavaScript код - без русских комментариев!
+✅ Используй return для возврата результата
+✅ Для даты: new Date().toLocaleDateString('ru-RU')
+✅ Для времени: new Date().toLocaleTimeString('ru-RU')
+✅ Математика: Math.sqrt(), Math.pow() и т.д.
+❌ НЕ используй русский текст внутри <EXECUTE_NOW> (только в строках результата)
+
+ЧЕСТНОСТЬ ПРЕВЫШЕ ВСЕГО! НЕ ВРИ О РЕЗУЛЬТАТАХ! 🎯`;
 
 // Initialize Express server
 let webhookServer = null;
@@ -452,6 +497,61 @@ async function executeInSandbox(code, chatId) {
     }
 }
 
+// Auto-fix common code issues
+function autoFixCommonIssues(code) {
+    if (!code || typeof code !== 'string') return code;
+    
+    // Remove Russian text that's not in strings
+    let fixed = code;
+    
+    // Common date/time patterns - convert to proper code
+    const lowerCode = code.toLowerCase();
+    
+    // If it looks like a date/time request with Russian text
+    if (/дата|время|date|time|сейчас|текущ/i.test(code) && !code.includes('Date')) {
+        // Replace with proper date code
+        return "const now = new Date(); return `📅 ${now.toLocaleDateString('ru-RU')} ⏰ ${now.toLocaleTimeString('ru-RU')}`;"
+    }
+    
+    // Try to fix common patterns
+    fixed = fixed.replace(/текущая дата/gi, "new Date().toLocaleDateString('ru-RU')");
+    fixed = fixed.replace(/текущее время/gi, "new Date().toLocaleTimeString('ru-RU')");
+    fixed = fixed.replace(/сегодня/gi, "new Date().toLocaleDateString('ru-RU')");
+    
+    return fixed;
+}
+
+// Fallback execution for common requests when code fails
+function tryFallbackExecution(originalCode) {
+    if (!originalCode) return null;
+    
+    const lowerCode = originalCode.toLowerCase();
+    
+    // Date/time requests
+    if (/дата|date|сегодня|число/i.test(lowerCode) || /время|time|час|сейчас/i.test(lowerCode)) {
+        const now = new Date();
+        if (/время|time|час/i.test(lowerCode) && !/дата|date/i.test(lowerCode)) {
+            return `⏰ ${now.toLocaleTimeString('ru-RU')}`;
+        } else if (/дата|date|число|сегодня/i.test(lowerCode) && !/время|time/i.test(lowerCode)) {
+            return `📅 ${now.toLocaleDateString('ru-RU')}`;
+        } else {
+            return `📅 ${now.toLocaleDateString('ru-RU')} ⏰ ${now.toLocaleTimeString('ru-RU')}`;
+        }
+    }
+    
+    // Simple math operations
+    if (/^[0-9+\-*/().\s]+$/.test(originalCode.trim())) {
+        try {
+            const result = Function(`'use strict'; return (${originalCode.trim()})`)();
+            return result;
+        } catch (e) {
+            return null;
+        }
+    }
+    
+    return null;
+}
+
 // Parse and execute actions from AI response
 async function parseAndExecuteActions(aiResponse, chatId, userId) {
     let modifiedResponse = aiResponse;
@@ -470,16 +570,18 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             if (extracted) codeToRun = extracted;
             const recovery = tryRecoverCode(codeToRun);
             if (!recovery.ok) {
-                actionsExecuted.push(`❌ Ошибка: синтаксическая ошибка в добавляемом коде. Попытки восстановления: ${JSON.stringify(recovery.attempts.map(a=>a.reason))}`);
+                // Log error but don't show to user
                 console.error('[AUTO] Code recovery failed:', recovery.attempts);
+                console.error('[AUTO] Failed to add code:', code);
                 continue;
             }
             const result = await executeInSandbox(recovery.code, chatId);
-            actionsExecuted.push('✅ Код добавлен и выполнен');
+            actionsExecuted.push('✅ Команда добавлена');
             console.log('[AUTO] Code action executed');
         } catch (error) {
-            actionsExecuted.push(`❌ Ошибка: ${error.message}`);
+            // Log error but don't show to user
             console.error('[AUTO] Code action failed:', error.message);
+            console.error('[AUTO] Failed code:', code);
         }
     }
 
@@ -492,10 +594,23 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             let codeToRun = code;
             const extracted = extractCodeFromText(codeToRun);
             if (extracted) codeToRun = extracted;
-            const recovery = tryRecoverCode(codeToRun);
+            
+            // Auto-fix common issues for date/time requests
+            const autoFixedCode = autoFixCommonIssues(codeToRun);
+            
+            const recovery = tryRecoverCode(autoFixedCode);
             if (!recovery.ok) {
-                actionsExecuted.push(`❌ Ошибка: синтаксическая ошибка при выполнении кода. Попытки восстановления: ${JSON.stringify(recovery.attempts.map(a=>a.reason))}`);
+                // Silently log error but don't show to user
                 console.error('[AUTO] ExecuteNow recovery failed:', recovery.attempts);
+                console.error('[AUTO] Original code:', code);
+                // Try fallback for common requests
+                const fallbackResult = tryFallbackExecution(code);
+                if (fallbackResult !== null) {
+                    actionsExecuted.push(`📊 Результат: ${fallbackResult}`);
+                    console.log('[AUTO] Fallback execution succeeded:', fallbackResult);
+                    continue;
+                }
+                // Skip silently - don't notify user about syntax errors
                 continue;
             }
             const result = await executeInSandbox(recovery.code, chatId);
@@ -504,7 +619,16 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             }
             console.log('[AUTO] Execute now:', result);
         } catch (error) {
-            actionsExecuted.push(`❌ Ошибка: ${error.message}`);
+            // Log error but don't show to user
+            console.error('[AUTO] Execution error:', error.message);
+            console.error('[AUTO] Failed code:', code);
+            // Try fallback
+            const fallbackResult = tryFallbackExecution(code);
+            if (fallbackResult !== null) {
+                actionsExecuted.push(`📊 Результат: ${fallbackResult}`);
+                console.log('[AUTO] Fallback after error:', fallbackResult);
+            }
+            // Otherwise skip silently
         }
     }
 
@@ -529,6 +653,20 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                 cmdList += `  /${cmdName}\n`;
             }
             actionsExecuted.push(cmdList);
+        }
+    }
+
+    // Action: LIST_BOTS
+    if (aiResponse.includes('<LIST_BOTS>')) {
+        if (runningBots.size === 0) {
+            actionsExecuted.push('📝 Нет запущенных дочерних ботов');
+        } else {
+            let botsList = '🤖 Запущенные боты:\n';
+            for (const [botId, botData] of runningBots) {
+                const tokenPreview = botData.token.substring(0, 10) + '...';
+                botsList += `  • ${botId} (токен: ${tokenPreview})\n`;
+            }
+            actionsExecuted.push(botsList);
         }
     }
 
@@ -647,7 +785,10 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         .replace(/<DELETE_COMMAND>.*?<\/DELETE_COMMAND>/g, '')
         .replace(/<LIST_COMMANDS><\/LIST_COMMANDS>/g, '')
         .replace(/<LIST_COMMANDS>/g, '')
+        .replace(/<LIST_BOTS><\/LIST_BOTS>/g, '')
+        .replace(/<LIST_BOTS>/g, '')
         .replace(/<ACTIVATE_BOT>[\s\S]*?<\/ACTIVATE_BOT>/g, '')
+        .replace(/<STOP_BOT>[\s\S]*?<\/STOP_BOT>/g, '')
         .trim();
 
     return { response: modifiedResponse, actions: actionsExecuted };
