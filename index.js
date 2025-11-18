@@ -135,11 +135,24 @@ return sum;
 4. Показать команды:
 <LIST_COMMANDS></LIST_COMMANDS>
 
-5. Активировать бота:
+5. Активировать бота (ПОЛНЫЙ код обязателен!):
 <ACTIVATE_BOT>
-TOKEN: токен
-CODE: bot.on('message', (msg) => {...});
+TOKEN: токен_полностью
+CODE: 
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    await bot.sendMessage(chatId, 'Привет!');
+  } catch (e) {
+    console.error(e);
+  }
+});
 </ACTIVATE_BOT>
+
+⚠️ КРИТИЧЕСКИ ВАЖНО:
+- TOKEN должен быть ПОЛНЫМ (не обрезанным!)
+- CODE должен быть ПОЛНЫМ рабочим кодом
+- НЕ пиши "Бот запущен" ДО тега - система сама сообщит!
 
 6. Остановить бота (ОБЯЗАТЕЛЬНО нужен токен!):
 <STOP_BOT>токен_бота</STOP_BOT>
@@ -209,6 +222,28 @@ return 2+2*5;
 
 ---
 
+Пользователь: "создай бота который приветствует"
+Ты: Создаю бота!
+
+<ACTIVATE_BOT>
+TOKEN: 1234567890:AAHdT3k...
+CODE:
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  if (!text) return;
+  try {
+    await bot.sendMessage(chatId, '👋 Привет! Я новый бот!');
+  } catch (e) {
+    console.error('Error:', e.message);
+  }
+});
+</ACTIVATE_BOT>
+
+⚠️ НЕ писал "Бот запущен" ДО тега! Система сама скажет: ✅ Бот bot_XXX успешно запущен
+
+---
+
 Пользователь: "какая сегодня дата?" или "скажи текущее время"
 Ты: Сейчас узнаю! 📅
 
@@ -253,10 +288,13 @@ registerCommand('calc', async (chatId, args) => {
 🚫 АБСОЛЮТНО ЗАПРЕЩЕНО:
 
 ❌❌❌ НЕ ПИШИ ТЕКСТ ПРО РЕЗУЛЬТАТЫ БЕЗ ТЕГОВ!
-❌ НЕ пиши "Бот остановлен" БЕЗ тега <STOP_BOT>
+❌ НЕ пиши "Бот остановлен" БЕз тега <STOP_BOT>
+❌ НЕ пиши "Бот запущен" БЕЗ тега <ACTIVATE_BOT>
 ❌ НЕ пиши "Команда удалена" БЕЗ тега <DELETE_COMMAND>
 ❌ НЕ пиши "Команда добавлена" БЕЗ тега <CODE_ACTION>
 ❌ НИКОГДА не генерируй фейковые успешные сообщения
+❌ НЕ ОБРЕЗАЙ код внутри тегов - пиши ПОЛНОСТЬЮ!
+❌ НЕ ОБРЕЗАЙ токены - пиши ПОЛНОСТЬЮ!
 
 🔥 ПРАВИЛО: СНАЧАЛА ТЕГ, ПОТОМ ТЕКСТ!
 
@@ -516,9 +554,17 @@ async function sendLongMessage(chatId, text, options = {}) {
             }
         } catch (error) {
             console.error(`[SEND ERROR] Chunk ${i + 1}/${chunks.length} failed:`, error.message);
-            // If markdown fails, try without it
-            if (error.message.includes('parse')) {
-                await bot.sendMessage(chatId, chunks[i]);
+            
+            // If markdown/parse error, try without markdown
+            if (error.message.includes('parse') || error.message.includes('entities')) {
+                console.log(`[SEND] Retrying chunk ${i + 1} without markdown...`);
+                try {
+                    await bot.sendMessage(chatId, chunks[i]);
+                } catch (e2) {
+                    console.error(`[SEND ERROR] Plain text also failed:`, e2.message);
+                    // Last resort: send error notification
+                    await bot.sendMessage(chatId, '❌ Ошибка отправки сообщения');
+                }
             } else {
                 throw error;
             }
@@ -983,12 +1029,31 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     const activateBotRegex = /<ACTIVATE_BOT>([\s\S]*?)<\/ACTIVATE_BOT>/g;
     while ((match = activateBotRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
-        const tokenMatch = content.match(/TOKEN:\s*(.+)/);
+        const tokenMatch = content.match(/TOKEN:\s*([^\n]+)/);
         const codeMatch = content.match(/CODE:\s*([\s\S]+)/);
         
+        if (!tokenMatch) {
+            actionsExecuted.push('❌ Не указан TOKEN в <ACTIVATE_BOT>');
+            console.error('[BOT] Missing TOKEN in ACTIVATE_BOT tag');
+            continue;
+        }
+        
+        if (!codeMatch) {
+            actionsExecuted.push('❌ Не указан CODE в <ACTIVATE_BOT>');
+            console.error('[BOT] Missing CODE in ACTIVATE_BOT tag');
+            continue;
+        }
+        
+        const token = tokenMatch[1].trim();
+        const code = codeMatch[1].trim();
+        
+        if (!code || code.length < 10) {
+            actionsExecuted.push('❌ Код бота слишком короткий или пустой');
+            console.error('[BOT] Invalid bot code:', code);
+            continue;
+        }
+        
         if (tokenMatch && codeMatch) {
-            const token = tokenMatch[1].trim();
-            const code = codeMatch[1].trim();
             
             try {
                 startWebhookServer();
@@ -1066,9 +1131,19 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                     await botResult;
                 }
                 
-                actionsExecuted.push(`🤖 Бот ${botId} активирован`);
+                actionsExecuted.push(`✅ Бот ${botId} успешно запущен`);
+                console.log(`[BOT] Bot ${botId} activated successfully`);
             } catch (error) {
-                actionsExecuted.push(`❌ Ошибка активации: ${error.message}`);
+                console.error(`[BOT] Activation failed:`, error.message);
+                
+                // More informative error messages
+                if (error.message.includes('Conflict')) {
+                    actionsExecuted.push(`❌ Бот уже запущен где-то еще. Останови другую копию.`);
+                } else if (error.message.includes('401')) {
+                    actionsExecuted.push(`❌ Неверный токен бота`);
+                } else {
+                    actionsExecuted.push(`❌ Ошибка: ${error.message}`);
+                }
             }
         }
     }
