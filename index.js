@@ -227,6 +227,32 @@ function deleteCommand(commandName) {
     return false;
 }
 
+// Stop and cleanup bots that use a specific token
+function stopBotsByToken(token) {
+    const reports = [];
+    for (const [id, entry] of runningBots) {
+        if (entry.token === token) {
+            try {
+                const childBot = entry.bot;
+                // stop polling if available
+                if (childBot.stopPolling) {
+                    try { childBot.stopPolling(); } catch (e) { /* ignore */ }
+                }
+                // remove all listeners so it no longer responds
+                try { childBot.removeAllListeners && childBot.removeAllListeners(); } catch (e) { /* ignore */ }
+                // try to call close if present
+                try { childBot.close && childBot.close(); } catch (e) { /* ignore */ }
+
+                runningBots.delete(id);
+                reports.push({ id, token, status: 'stopped' });
+            } catch (err) {
+                reports.push({ id, token, status: 'failed', error: err.message });
+            }
+        }
+    }
+    return reports;
+}
+
 // Create safe sandbox for code execution
 function createSandbox(chatId) {
     return {
@@ -435,6 +461,33 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                 actionsExecuted.push(`🤖 Бот ${botId} активирован`);
             } catch (error) {
                 actionsExecuted.push(`❌ Ошибка активации: ${error.message}`);
+            }
+        }
+    }
+
+    // Action: STOP_BOT (force stop bots by token)
+    const stopBotRegex = /<STOP_BOT>([\s\S]*?)<\/STOP_BOT>/g;
+    while ((match = stopBotRegex.exec(aiResponse)) !== null) {
+        const tokenToStop = match[1].trim();
+        if (!tokenToStop) {
+            actionsExecuted.push('❌ Токен для остановки не указан');
+            continue;
+        }
+        // Prevent stopping main bot by mistake
+        if (tokenToStop === TELEGRAM_TOKEN) {
+            actionsExecuted.push('❌ Попытка остановить основной бот запрещена');
+            continue;
+        }
+        const reports = stopBotsByToken(tokenToStop);
+        if (reports.length === 0) {
+            actionsExecuted.push('ℹ️ Ботов с таким токеном не найдено в текущем процессе');
+        } else {
+            for (const r of reports) {
+                if (r.status === 'stopped') {
+                    actionsExecuted.push(`✅ Остановлен бот ${r.id}`);
+                } else {
+                    actionsExecuted.push(`❌ Не удалось остановить ${r.id}: ${r.error}`);
+                }
             }
         }
     }
@@ -707,6 +760,29 @@ app.get('/health', (req, res) => {
         commands: customCommands.size,
         functions: customFunctions.size
     });
+});
+
+// Admin endpoint to stop bots by token
+// Protect with ADMIN_SECRET in .env (required)
+app.post('/admin/stopByToken', (req, res) => {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const provided = req.headers['x-admin-secret'] || req.body.secret;
+    if (!adminSecret || provided !== adminSecret) {
+        return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const token = req.body.token;
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    if (token === TELEGRAM_TOKEN) {
+        return res.status(400).json({ error: 'cannot stop main bot' });
+    }
+
+    const reports = stopBotsByToken(token);
+    if (reports.length === 0) {
+        return res.json({ status: 'not_found' });
+    }
+    return res.json({ status: 'stopped', reports });
 });
 
 startWebhookServer();
