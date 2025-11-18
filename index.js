@@ -307,6 +307,82 @@ function createSandbox(chatId) {
     };
 }
 
+// Extract code from free-form AI text (supports fenced blocks and <code> tags)
+function extractCodeFromText(text) {
+    if (!text || typeof text !== 'string') return '';
+
+    // 1) Triple-backtick fenced block
+    const fenceMatch = text.match(/```(?:[a-zA-Z]+)?\n([\s\S]*?)```/);
+    if (fenceMatch) return fenceMatch[1].trim();
+
+    // 2) HTML/code tag
+    const htmlMatch = text.match(/<code>([\s\S]*?)<\/code>/i);
+    if (htmlMatch) return htmlMatch[1].trim();
+
+    // 3) If the string looks like code (contains braces or semicolons), return it
+    if (/[{};=()<>]/.test(text)) return text.trim();
+
+    return '';
+}
+
+// Basic sanitization attempts for AI-provided code
+function sanitizeCode(code) {
+    if (!code || typeof code !== 'string') return code;
+    // normalize smart quotes and dashes, remove CR
+    let out = code.replace(/[“”«»„”]/g, '"')
+                  .replace(/[‘’]/g, "'")
+                  .replace(/\u2013|\u2014/g, '-')
+                  .replace(/\r/g, '');
+    // Trim trailing non-ASCII commentary lines that often appear in AI outputs
+    return out;
+}
+
+// Remove lines that contain non-ASCII letters (useful to strip accidental Russian text)
+function removeNonAsciiLines(code) {
+    return code.split('\n').filter(line => {
+        // keep if line contains common JS tokens or is ASCII-only
+        if (/^[\x00-\x7F]*$/.test(line)) return true;
+        // allow lines that contain obvious JS characters even if they include non-ascii
+        return /[{}();=]/.test(line);
+    }).join('\n');
+}
+
+// Try to recover code: validate with vm.Script; on failure attempt simple fixes
+function tryRecoverCode(rawCode) {
+    const attempts = [];
+    let code = sanitizeCode(rawCode);
+    attempts.push({ reason: 'sanitized', code });
+
+    try {
+        new vm.Script(code);
+        return { ok: true, code, attempts };
+    } catch (e) {
+        attempts.push({ reason: 'initial parse failed', error: e.message });
+    }
+
+    // Attempt: remove non-ascii lines
+    const asciiStripped = removeNonAsciiLines(code);
+    attempts.push({ reason: 'ascii-stripped', code: asciiStripped });
+    try {
+        new vm.Script(asciiStripped);
+        return { ok: true, code: asciiStripped, attempts };
+    } catch (e) {
+        attempts.push({ reason: 'ascii-strip failed', error: e.message });
+    }
+
+    // Last resort: extract only lines that look like JS statements
+    const jsLike = asciiStripped.split('\n').filter(l => /[a-zA-Z0-9_$]+\s*(=|\(|=>|function|\.)/.test(l)).join('\n');
+    attempts.push({ reason: 'js-like-lines', code: jsLike });
+    try {
+        new vm.Script(jsLike);
+        return { ok: true, code: jsLike, attempts };
+    } catch (e) {
+        attempts.push({ reason: 'js-like failed', error: e.message });
+    }
+
+    return { ok: false, attempts };
+}
+
 // Execute code in safe sandbox
 async function executeInSandbox(code, chatId) {
     try {
@@ -344,7 +420,17 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     while ((match = codeActionRegex.exec(aiResponse)) !== null) {
         const code = match[1].trim();
         try {
-            const result = await executeInSandbox(code, chatId);
+            // Try to extract and recover code before execution
+            let codeToRun = code;
+            const extracted = extractCodeFromText(codeToRun);
+            if (extracted) codeToRun = extracted;
+            const recovery = tryRecoverCode(codeToRun);
+            if (!recovery.ok) {
+                actionsExecuted.push(`❌ Ошибка: синтаксическая ошибка в добавляемом коде. Попытки восстановления: ${JSON.stringify(recovery.attempts.map(a=>a.reason))}`);
+                console.error('[AUTO] Code recovery failed:', recovery.attempts);
+                continue;
+            }
+            const result = await executeInSandbox(recovery.code, chatId);
             actionsExecuted.push('✅ Код добавлен и выполнен');
             console.log('[AUTO] Code action executed');
         } catch (error) {
@@ -358,7 +444,17 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     while ((match = executeNowRegex.exec(aiResponse)) !== null) {
         const code = match[1].trim();
         try {
-            const result = await executeInSandbox(code, chatId);
+            // Preprocess and attempt recovery for execute-now snippets
+            let codeToRun = code;
+            const extracted = extractCodeFromText(codeToRun);
+            if (extracted) codeToRun = extracted;
+            const recovery = tryRecoverCode(codeToRun);
+            if (!recovery.ok) {
+                actionsExecuted.push(`❌ Ошибка: синтаксическая ошибка при выполнении кода. Попытки восстановления: ${JSON.stringify(recovery.attempts.map(a=>a.reason))}`);
+                console.error('[AUTO] ExecuteNow recovery failed:', recovery.attempts);
+                continue;
+            }
+            const result = await executeInSandbox(recovery.code, chatId);
             if (result !== undefined) {
                 actionsExecuted.push(`📊 Результат: ${result}`);
             }
@@ -450,8 +546,16 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                 botSandbox.bot = newBot;
                 const botContext = vm.createContext(botSandbox);
 
-                // Wrap user code so top-level returns/awaits work
-                const wrappedBotCode = `(async () => {\n${code}\n})()`;
+                // Try to recover/validate code before running child bot code
+                let codeToRun = code;
+                const extracted = extractCodeFromText(codeToRun);
+                if (extracted) codeToRun = extracted;
+                const recovery = tryRecoverCode(codeToRun);
+                if (!recovery.ok) {
+                    throw new Error('Синтаксическая ошибка в коде активации дочернего бота. Попытки восстановления: ' + JSON.stringify(recovery.attempts.map(a=>a.reason)));
+                }
+
+                const wrappedBotCode = `(async () => {\n${recovery.code}\n})()`;
                 const botScript = new vm.Script(wrappedBotCode, { timeout: 5000 });
                 const botResult = botScript.runInContext(botContext);
                 if (botResult && typeof botResult.then === 'function') {
