@@ -361,20 +361,86 @@ function deleteCommand(commandName) {
     return false;
 }
 
+// Split long message into chunks (Telegram limit is 4096 chars)
+function splitMessage(text, maxLength = 4000) {
+    if (text.length <= maxLength) return [text];
+    
+    const chunks = [];
+    let currentChunk = '';
+    const lines = text.split('\n');
+    
+    for (const line of lines) {
+        if ((currentChunk + line + '\n').length > maxLength) {
+            if (currentChunk) {
+                chunks.push(currentChunk.trim());
+                currentChunk = '';
+            }
+            
+            // If single line is too long, split by words
+            if (line.length > maxLength) {
+                const words = line.split(' ');
+                for (const word of words) {
+                    if ((currentChunk + word + ' ').length > maxLength) {
+                        chunks.push(currentChunk.trim());
+                        currentChunk = word + ' ';
+                    } else {
+                        currentChunk += word + ' ';
+                    }
+                }
+            } else {
+                currentChunk = line + '\n';
+            }
+        } else {
+            currentChunk += line + '\n';
+        }
+    }
+    
+    if (currentChunk) {
+        chunks.push(currentChunk.trim());
+    }
+    
+    return chunks;
+}
+
+// Helper to send long messages (splits if needed)
+async function sendLongMessage(chatId, text, options = {}) {
+    const chunks = splitMessage(text);
+    
+    console.log(`[SEND] Message length: ${text.length} chars, chunks: ${chunks.length}`);
+    
+    for (let i = 0; i < chunks.length; i++) {
+        try {
+            await bot.sendMessage(chatId, chunks[i], options);
+            // Small delay between chunks to avoid rate limiting
+            if (i < chunks.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        } catch (error) {
+            console.error(`[SEND ERROR] Chunk ${i + 1}/${chunks.length} failed:`, error.message);
+            // If markdown fails, try without it
+            if (error.message.includes('parse')) {
+                await bot.sendMessage(chatId, chunks[i]);
+            } else {
+                throw error;
+            }
+        }
+    }
+}
+
 // Helper to send command results (supports string or {text, options})
 async function sendCommandResult(chatId, result) {
     if (!result) return;
     if (typeof result === 'string') {
-        await bot.sendMessage(chatId, result);
+        await sendLongMessage(chatId, result);
         return;
     }
     if (typeof result === 'object' && result !== null) {
         const text = result.text || '';
         const options = result.options || result;
-        await bot.sendMessage(chatId, text, options);
+        await sendLongMessage(chatId, text, options);
         return;
     }
-    await bot.sendMessage(chatId, String(result));
+    await sendLongMessage(chatId, String(result));
 }
 
 // Register default /start command if none provided
@@ -1067,13 +1133,8 @@ bot.on('message', async (msg) => {
             finalMessage = '✅ Выполнено';
         }
         
-        try {
-            await bot.sendMessage(chatId, finalMessage, { parse_mode: 'Markdown' });
-        } catch (sendError) {
-            // If markdown fails, try without it
-            console.warn('[AI] Markdown failed, sending plain text');
-            await bot.sendMessage(chatId, finalMessage);
-        }
+        // Use sendLongMessage to handle long responses
+        await sendLongMessage(chatId, finalMessage, { parse_mode: 'Markdown' });
         
     } catch (error) {
         console.error('[ERROR] Message processing failed:', error.message);
@@ -1160,12 +1221,8 @@ bot.on('photo', async (msg) => {
             finalMessage = '🖼️ Фото обработано, но не удалось сгенерировать описание.';
         }
         
-        try {
-            await bot.sendMessage(chatId, finalMessage, { parse_mode: 'Markdown' });
-        } catch (sendError) {
-            console.warn('[PHOTO] Markdown failed, sending plain text');
-            await bot.sendMessage(chatId, finalMessage);
-        }
+        // Use sendLongMessage to handle long descriptions
+        await sendLongMessage(chatId, finalMessage, { parse_mode: 'Markdown' });
         
     } catch (error) {
         console.error('[PHOTO ERROR] Failed to process photo:', error.message);
