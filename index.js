@@ -272,7 +272,7 @@ async function callOpenRouter(messages, retries = 3) {
             const response = await axios.post(
                 'https://openrouter.ai/api/v1/chat/completions',
                 {
-                    model: 'openrouter/sherlock-think-alpha',
+                    model: 'openrouter/sherlock-dash-alpha',
                     messages: messages,
                     temperature: 0.9,
                     max_tokens: 4000
