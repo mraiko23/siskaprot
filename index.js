@@ -274,7 +274,8 @@ function createSandbox(chatId) {
         // Utils
         eval: (code) => {
             // Safe eval for math expressions only
-            const mathOnly = code.replace(/[^0-9+\\-*/(). ]/g, '');
+            // allow digits, + - * / ( ) . and whitespace; place hyphen at end of class to avoid range
+            const mathOnly = code.replace(/[^0-9+*/().\s-]/g, '');
             return Function(`'use strict'; return (${mathOnly})`)();
         }
     };
