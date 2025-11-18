@@ -11,6 +11,19 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const PORT = process.env.PORT || 3000;
 
+// Validate environment variables
+if (!TELEGRAM_TOKEN) {
+    console.error('❌ Ошибка: Не указан TELEGRAM_BOT_TOKEN в .env файле!');
+    process.exit(1);
+}
+if (!OPENROUTER_API_KEY) {
+    console.error('❌ Ошибка: Не указан OPENROUTER_API_KEY в .env файле!');
+    process.exit(1);
+}
+
+console.log('✅ Конфигурация загружена');
+console.log('🤖 Запуск бота...');
+
 // Polling options (tuneable)
 const pollingOptions = {
     interval: 300,
@@ -20,7 +33,14 @@ const pollingOptions = {
 };
 
 // Initialize bot with explicit polling options
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: pollingOptions });
+let bot;
+try {
+    bot = new TelegramBot(TELEGRAM_TOKEN, { polling: pollingOptions });
+    console.log('✅ Telegram бот инициализирован');
+} catch (error) {
+    console.error('❌ Ошибка инициализации бота:', error.message);
+    process.exit(1);
+}
 
 // Express app for webhook server
 const app = express();
@@ -216,31 +236,65 @@ function startWebhookServer() {
     tryPort(currentPort);
 }
 
-// Call OpenRouter API
-async function callOpenRouter(messages) {
-    try {
-        const response = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            {
-                model: 'openrouter/sherlock-dash-alpha',
-                messages: messages,
-                temperature: 0.9,
-                max_tokens: 4000
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                    'HTTP-Referer': 'https://github.com/telegram-bot',
-                    'X-Title': 'Autonomous Self-Modifying Bot',
-                    'Content-Type': 'application/json'
+// Call OpenRouter API with retry mechanism
+async function callOpenRouter(messages, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            console.log(`[API] Calling OpenRouter (attempt ${attempt}/${retries})...`);
+            
+            const response = await axios.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                {
+                    model: 'openrouter/sherlock-dash-alpha',
+                    messages: messages,
+                    temperature: 0.9,
+                    max_tokens: 4000
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                        'HTTP-Referer': 'https://github.com/telegram-bot',
+                        'X-Title': 'Autonomous Self-Modifying Bot',
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 60000 // 60 seconds timeout
                 }
+            );
+            
+            const content = response.data.choices?.[0]?.message?.content;
+            
+            if (!content || content.trim() === '') {
+                console.warn(`[API] Empty response received on attempt ${attempt}`);
+                if (attempt < retries) {
+                    await new Promise(resolve => setTimeout(resolve, 2000 * attempt)); // Wait before retry
+                    continue;
+                }
+                throw new Error('Получен пустой ответ от AI');
             }
-        );
-        
-        return response.data.choices[0].message.content;
-    } catch (error) {
-        console.error('OpenRouter API Error:', error.response?.data || error.message);
-        throw new Error('API error: ' + (error.response?.data?.error?.message || error.message));
+            
+            console.log(`[API] Success! Response length: ${content.length} chars`);
+            return content;
+            
+        } catch (error) {
+            const isLastAttempt = attempt === retries;
+            const errorMsg = error.response?.data?.error?.message || error.message;
+            
+            console.error(`[API ERROR] Attempt ${attempt}/${retries} failed:`, errorMsg);
+            
+            if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+                console.error('[API ERROR] Timeout - API took too long to respond');
+            }
+            
+            if (isLastAttempt) {
+                console.error('[API ERROR] All retry attempts failed!');
+                throw new Error('AI временно недоступен. Попробуйте через минуту.');
+            }
+            
+            // Wait before next retry (exponential backoff)
+            const waitTime = 2000 * attempt;
+            console.log(`[API] Waiting ${waitTime}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
     }
 }
 
@@ -796,19 +850,31 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
 
 // Handle text messages
 bot.on('message', async (msg) => {
+    // Skip if it's a photo message (will be handled by photo handler)
+    if (msg.photo) {
+        console.log('[PHOTO MESSAGE]', {
+            from: msg.from.username || msg.from.first_name,
+            caption: msg.caption || '(no caption)',
+            chat_id: msg.chat.id
+        });
+        return;
+    }
+    
     console.log('[MESSAGE RECEIVED]', {
         from: msg.from.username || msg.from.first_name,
         text: msg.text,
         chat_id: msg.chat.id
     });
     
-    if (msg.photo) return;
-    
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     const text = msg.text;
     
-    if (!text) return;
+    // Skip if no text (e.g., stickers, voice messages, etc.)
+    if (!text) {
+        console.log('[INFO] Skipping message without text');
+        return;
+    }
     
     // Handle /start — if a custom /start command exists, call it; otherwise send default message
     if (text === '/start') {
@@ -894,8 +960,24 @@ bot.on('message', async (msg) => {
         
         addToHistory(userId, 'user', text);
         const history = getConversationHistory(userId);
-        const aiResponse = await callOpenRouter(history);
-        console.log('[AI] Response received:', aiResponse.substring(0, 100) + '...');
+        
+        let aiResponse;
+        try {
+            aiResponse = await callOpenRouter(history);
+            console.log('[AI] Response received:', aiResponse.substring(0, 100) + '...');
+        } catch (apiError) {
+            console.error('[AI] API call failed:', apiError.message);
+            // Send error message to user
+            await bot.sendMessage(chatId, `❌ ${apiError.message}\n\nПопробуйте еще раз через несколько секунд.`);
+            return;
+        }
+        
+        // Validate response
+        if (!aiResponse || aiResponse.trim() === '') {
+            console.error('[AI] Empty response after retries');
+            await bot.sendMessage(chatId, '❌ Получен пустой ответ. Попробуйте еще раз.');
+            return;
+        }
         
         // Parse and execute actions automatically
         const { response, actions } = await parseAndExecuteActions(aiResponse, chatId, userId);
@@ -909,18 +991,29 @@ bot.on('message', async (msg) => {
             finalMessage += '\n\n' + actions.join('\n');
         }
         
-        if (finalMessage.trim()) {
-            bot.sendMessage(chatId, finalMessage, { 
-                parse_mode: 'Markdown' 
-            }).catch(() => {
-                bot.sendMessage(chatId, finalMessage);
-            });
+        // Always send something to user
+        if (!finalMessage || finalMessage.trim() === '') {
+            console.warn('[AI] Empty final message, sending fallback');
+            finalMessage = '✅ Выполнено';
+        }
+        
+        try {
+            await bot.sendMessage(chatId, finalMessage, { parse_mode: 'Markdown' });
+        } catch (sendError) {
+            // If markdown fails, try without it
+            console.warn('[AI] Markdown failed, sending plain text');
+            await bot.sendMessage(chatId, finalMessage);
         }
         
     } catch (error) {
         console.error('[ERROR] Message processing failed:', error.message);
         console.error('[ERROR] Stack:', error.stack);
-        bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`);
+        // Always notify user about error
+        try {
+            await bot.sendMessage(chatId, `❌ Произошла ошибка. Попробуйте еще раз.`);
+        } catch (e) {
+            console.error('[ERROR] Failed to send error message:', e.message);
+        }
     }
 });
 
@@ -928,9 +1021,12 @@ console.log('📡 Message handler registered');
 
 // Handle photo messages
 bot.on('photo', async (msg) => {
+    console.log('[PHOTO HANDLER] Processing photo message');
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     const caption = msg.caption || 'Опиши подробно что на этой картинке: все объекты, цвета, текст, детали, контекст. Будь максимально подробным!';
+    
+    console.log('[PHOTO HANDLER] Caption:', caption);
     
     try {
         bot.sendChatAction(chatId, 'typing');
@@ -960,7 +1056,24 @@ bot.on('photo', async (msg) => {
         
         const history = getConversationHistory(userId);
         const messagesWithImage = [...history.slice(0, -1), userMessage];
-        const aiResponse = await callOpenRouter(messagesWithImage);
+        
+        let aiResponse;
+        try {
+            console.log('[PHOTO] Sending to AI...');
+            aiResponse = await callOpenRouter(messagesWithImage);
+            console.log('[PHOTO] AI Response received:', aiResponse.substring(0, 100) + '...');
+        } catch (apiError) {
+            console.error('[PHOTO] API call failed:', apiError.message);
+            await bot.sendMessage(chatId, `❌ ${apiError.message}\n\nПопробуйте отправить фото еще раз.`);
+            return;
+        }
+        
+        // Validate response
+        if (!aiResponse || aiResponse.trim() === '') {
+            console.error('[PHOTO] Empty AI response');
+            await bot.sendMessage(chatId, '❌ Получен пустой ответ. Попробуйте еще раз.');
+            return;
+        }
         
         const { response, actions } = await parseAndExecuteActions(aiResponse, chatId, userId);
         
@@ -971,17 +1084,27 @@ bot.on('photo', async (msg) => {
             finalMessage += '\n\n' + actions.join('\n');
         }
         
-        bot.sendMessage(chatId, finalMessage, { 
-            parse_mode: 'Markdown' 
-        }).catch(() => {
-            bot.sendMessage(chatId, finalMessage);
-        });
+        // Always send something to user
+        if (!finalMessage || finalMessage.trim() === '') {
+            console.warn('[PHOTO] Empty final message, sending fallback');
+            finalMessage = '🖼️ Фото обработано, но не удалось сгенерировать описание.';
+        }
+        
+        try {
+            await bot.sendMessage(chatId, finalMessage, { parse_mode: 'Markdown' });
+        } catch (sendError) {
+            console.warn('[PHOTO] Markdown failed, sending plain text');
+            await bot.sendMessage(chatId, finalMessage);
+        }
         
     } catch (error) {
-        console.error('Photo error:', error);
-        bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`);
+        console.error('[PHOTO ERROR] Failed to process photo:', error.message);
+        console.error('[PHOTO ERROR] Stack:', error.stack);
+        bot.sendMessage(chatId, `❌ Ошибка при обработке фото: ${error.message}`);
     }
 });
+
+console.log('📸 Photo handler registered');
 
 // Error handling
 bot.on('polling_error', (error) => {
