@@ -551,7 +551,7 @@ function deleteCommand(commandName) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function createSandbox(chatId) {
-    return {
+    const sandbox = {
         // Core Node.js
         console,
         require,
@@ -563,6 +563,7 @@ function createSandbox(chatId) {
         clearInterval,
         __dirname,
         __filename,
+        global: undefined, // Will be set to sandbox itself
         
         // Standard JS
         Math,
@@ -605,6 +606,9 @@ function createSandbox(chatId) {
         app,
         express
     };
+    // Set global to point to sandbox itself
+    sandbox.global = sandbox;
+    return sandbox;
 }
 
 async function executeInSandbox(code, chatId) {
@@ -1096,10 +1100,10 @@ async function sendLongMessage(chatId, text) {
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
-    const text = msg.text;
+    const text = msg.text || msg.caption || '';
     
-    // Ignore messages without text
-    if (!text) return;
+    // Ignore messages without text and without photo
+    if (!text && !msg.photo) return;
     
     console.log(`[Message] User ${userId}: ${text.substring(0, 50)}...`);
     
@@ -1161,10 +1165,39 @@ bot.on('message', async (msg) => {
         // Get conversation history
         const history = getConversationHistory(userId);
         
-        // Add image analysis if photo present
-        let userMessage = text;
+        // Handle image + text
+        let userMessage;
         if (msg.photo && msg.photo.length > 0) {
-            userMessage += '\n[Пользователь отправил изображение - проанализируй его детально]';
+            // Get the highest quality photo
+            const photo = msg.photo[msg.photo.length - 1];
+            const fileLink = await bot.getFileLink(photo.file_id);
+            
+            // Create multimodal content
+            const content = [];
+            
+            if (text) {
+                content.push({
+                    type: 'text',
+                    text: text
+                });
+            } else {
+                content.push({
+                    type: 'text',
+                    text: 'Что изображено на этой картинке? Опиши детально.'
+                });
+            }
+            
+            content.push({
+                type: 'image_url',
+                image_url: {
+                    url: fileLink
+                }
+            });
+            
+            userMessage = content;
+            console.log(`[Image] User ${userId} sent photo: ${fileLink}`);
+        } else {
+            userMessage = text;
         }
         
         addToHistory(userId, 'user', userMessage);
