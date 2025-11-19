@@ -71,7 +71,8 @@ app.use(express.static('public'));
 const cache = {
     conversations: new Map(), // Only conversations kept in memory
     runningBots: new Map(),   // Active bot instances (can't be serialized)
-    botUsernames: new Map()   // Map Telegram bot username (lowercased) -> internal botName
+    botUsernames: new Map(),  // Map Telegram bot username (lowercased) -> internal botName
+    recentlyCreatedBots: new Map() // botName -> timestamp(ms) to prevent immediate accidental deletion
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1428,7 +1429,8 @@ async function deleteBot(botName) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function createSandbox(chatId) {
-    return {
+    // Create sandbox object
+    const sandbox = {
         console,
         require,
         Buffer,
@@ -1458,7 +1460,6 @@ function createSandbox(chatId) {
         decodeURIComponent,
         bot,
         axios,
-        TelegramBot,
         chatId,
         registerCommand,
         deleteCommand,
@@ -1471,6 +1472,32 @@ function createSandbox(chatId) {
         app,
         express
     };
+
+    // Provide a TelegramBot wrapper that auto-registers created instances via sandbox.setBotInstance (if present).
+    try {
+        const RealTelegramBot = TelegramBot;
+        function TelegramBotWrapper(token, options) {
+            // Construct real instance
+            const instance = new RealTelegramBot(token, options);
+            try {
+                if (sandbox && typeof sandbox.setBotInstance === 'function') {
+                    // Best-effort: register immediately
+                    sandbox.setBotInstance(instance);
+                }
+            } catch (e) {
+                // ignore registration failures
+            }
+            return instance;
+        }
+        // Preserve prototype chain so instanceof checks still work
+        TelegramBotWrapper.prototype = RealTelegramBot.prototype;
+        sandbox.TelegramBot = TelegramBotWrapper;
+    } catch (e) {
+        // If TelegramBot is not available for some reason, expose undefined
+        sandbox.TelegramBot = undefined;
+    }
+
+    return sandbox;
 }
 
 async function executeInSandbox(code, chatId) {
@@ -1499,6 +1526,7 @@ async function executeInSandbox(code, chatId) {
 
 async function parseAndExecuteActions(aiResponse, chatId, userId) {
     let actionsExecuted = [];
+    const processedActions = new Set(); // prevent duplicate actions within one AI response
 
     // 1. CODE_ACTION - Add command
     const codeActionRegex = /<CODE_ACTION>([\s\S]*?)<\/CODE_ACTION>/g;
@@ -1928,6 +1956,12 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             const botToken = tokenMatch[1].trim();
             const botCode = codeMatch[1].trim();
             
+            if (processedActions.has(`create:${botName}`)) {
+                actionsExecuted.push(`⚠️ Пропущено повторное создание бота "${botName}" в одном ответе.`);
+                continue;
+            }
+            processedActions.add(`create:${botName}`);
+            
             try {
                 // Save bot to GitHub
                 const result = await dataManager.saveBot(botName, {
@@ -1938,8 +1972,13 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                 
                 if (result.success) {
                     // Start the bot
-                    await restoreBot(botName, botToken, botCode);
-                    actionsExecuted.push(`🎉 Бот "${botName}" создан и запущен!\n✅ Сохранён на GitHub\n🔥 При перезапуске автоматически загрузится!`);
+                    const started = await restoreBot(botName, botToken, botCode);
+                    // Mark as recently created (protect from immediate accidental delete for 30s)
+                    try {
+                        cache.recentlyCreatedBots.set(botName, Date.now());
+                    } catch (e) { /* ignore */ }
+
+                    actionsExecuted.push(`🎉 Бот "${botName}" создан и ${started ? 'запущен' : 'запущен (не удалось подтвердить)'}!\n✅ Сохранён на GitHub\n🔥 При перезапуске автоматически загрузится!`);
                 } else {
                     actionsExecuted.push('❌ Ошибка сохранения бота: ' + result.error);
                 }
@@ -1956,6 +1995,20 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     while ((match = disableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
         try {
+            if (processedActions.has(`disable:${botName}`)) {
+                actionsExecuted.push(`⚠️ Пропущено повторное отключение бота "${botName}" в одном ответе.`);
+                continue;
+            }
+            processedActions.add(`disable:${botName}`);
+            // Prevent immediate accidental disable if bot was just created
+            const createdAt = cache.recentlyCreatedBots.get(botName);
+            if (createdAt && (Date.now() - createdAt) < 30000) {
+                actionsExecuted.push(`⚠️ Бот "${botName}" недавно создан — отменяю немедленное отключение. Попробуйте ещё раз через несколько секунд.`);
+                // Clean up old entry after message
+                cache.recentlyCreatedBots.delete(botName);
+                continue;
+            }
+
             // First check if bot exists in GitHub
             const botData = await dataManager.getBot(botName);
             if (!botData) {
@@ -1987,6 +2040,11 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     while ((match = enableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
         try {
+            if (processedActions.has(`enable:${botName}`)) {
+                actionsExecuted.push(`⚠️ Пропущено повторное включение бота "${botName}" в одном ответе.`);
+                continue;
+            }
+            processedActions.add(`enable:${botName}`);
             const result = await dataManager.enableBot(botName);
             if (result.success) {
                 const botData = await dataManager.getBot(botName);
@@ -2009,6 +2067,19 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     while ((match = deleteBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
         try {
+            if (processedActions.has(`delete:${botName}`)) {
+                actionsExecuted.push(`⚠️ Пропущено повторное удаление бота "${botName}" в одном ответе.`);
+                continue;
+            }
+            processedActions.add(`delete:${botName}`);
+            // Prevent immediate accidental delete if bot was just created
+            const createdAt = cache.recentlyCreatedBots.get(botName);
+            if (createdAt && (Date.now() - createdAt) < 30000) {
+                actionsExecuted.push(`⚠️ Бот "${botName}" недавно создан — отменяю немедленное удаление. Попробуйте ещё раз через несколько секунд.`);
+                cache.recentlyCreatedBots.delete(botName);
+                continue;
+            }
+
             const success = await deleteBot(botName);
             if (success) {
                 actionsExecuted.push(`✅ Бот ${botName} полностью удалён из GitHub`);
@@ -2457,20 +2528,10 @@ bot.on('message', async (msg) => {
                 const file = await bot.getFile(fileId);
                 const filePath = file.file_path;
                 
-                // Download image from Telegram servers
-                const fileUrl = `https://api.telegram.org/file/bot${CONFIG.TELEGRAM_TOKEN}/${filePath}`;
-                console.log('[Image] Downloading from:', fileUrl);
-                
-                const imageResponse = await axios.get(fileUrl, {
-                    responseType: 'arraybuffer'
-                });
-                
-                // Convert to base64
-                const base64Image = Buffer.from(imageResponse.data, 'binary').toString('base64');
-                const mimeType = imageResponse.headers['content-type'] || 'image/jpeg';
-                imageUrl = `data:${mimeType};base64,${base64Image}`;
-                
-                console.log('[Image] ✅ Processed successfully, size:', base64Image.length, 'bytes');
+                // Use the Telegram file URL directly instead of embedding huge base64 inline.
+                const fileUrlDirect = `https://api.telegram.org/file/bot${CONFIG.TELEGRAM_TOKEN}/${filePath}`;
+                imageUrl = fileUrlDirect;
+                console.log('[Image] ✅ Prepared image URL for AI:', fileUrlDirect);
                 
                 // If no caption provided, use default question
                 if (!text || text.trim() === '') {
