@@ -864,11 +864,30 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                 for (const [id, entry] of storage.runningBots) {
                     if (entry.token === token) {
                         try {
-                            entry.bot.stopPolling && entry.bot.stopPolling();
+                            console.log(`[Bot Manager] Stopping existing bot ${id} with same token`);
+                            entry.stopped = true;
+                            
+                            if (entry.bot.removeAllListeners) {
+                                entry.bot.removeAllListeners();
+                            }
+                            
+                            if (entry.bot.stopPolling) {
+                                await entry.bot.stopPolling({ cancel: true });
+                            }
+                            
+                            if (entry.bot.close) {
+                                await entry.bot.close();
+                            }
+                            
                             storage.runningBots.delete(id);
-                        } catch (e) {}
+                        } catch (e) {
+                            console.error(`[Bot Manager] Error stopping old bot:`, e);
+                        }
                     }
                 }
+
+                // Wait a bit to ensure old bot is fully stopped
+                await new Promise(resolve => setTimeout(resolve, 1000));
 
                 const newBot = new TelegramBot(token, {
                     polling: { interval: 500, params: { timeout: 10 } }
@@ -904,12 +923,33 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         for (const [id, entry] of storage.runningBots) {
             if (entry.token === token) {
                 try {
-                    entry.bot.stopPolling && entry.bot.stopPolling();
+                    // Mark bot as stopped to prevent further processing
+                    entry.stopped = true;
+                    
+                    // Remove all event listeners first
+                    if (entry.bot.removeAllListeners) {
+                        entry.bot.removeAllListeners();
+                    }
+                    
+                    // Stop polling with proper cleanup
+                    if (entry.bot.stopPolling) {
+                        await entry.bot.stopPolling({ cancel: true, reason: 'Bot stopped by user' });
+                    }
+                    
+                    // Close the bot connection
+                    if (entry.bot.close) {
+                        await entry.bot.close();
+                    }
+                    
+                    // Remove from storage
                     storage.runningBots.delete(id);
                     actionsExecuted.push(`✅ Бот ${id} остановлен`);
                     stopped = true;
+                    
+                    console.log(`[Bot Manager] Stopped bot ${id}`);
                 } catch (error) {
                     actionsExecuted.push(`❌ Ошибка остановки ${id}: ` + error.message);
+                    console.error(`[Bot Manager] Error stopping ${id}:`, error);
                 }
             }
         }
