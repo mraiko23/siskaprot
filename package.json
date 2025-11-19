@@ -1,7 +1,7 @@
 {
-  "name": "self-modifying-telegram-bot",
-  "version": "1.0.0",
-  "description": "Self-modifying Telegram bot with OpenRouter Sherlock-Dash-Alpha integration",
+  "name": "siskaprot-ai-bot",
+  "version": "2.0.0",
+  "description": "Powerful self-modifying Telegram bot with Google Gemini 2.5 Flash and GitHub storage",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -10,16 +10,19 @@
   "keywords": [
     "telegram",
     "bot",
-    "openrouter",
+    "gemini",
     "ai",
-    "self-modifying"
+    "self-modifying",
+    "autonomous"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@octokit/rest": "^21.0.2",
     "node-telegram-bot-api": "^0.66.0",
-    "axios": "^1.6.5",
-    "express": "^4.18.2",
-    "dotenv": "^16.3.1"
+    "axios": "^1.7.7",
+    "express": "^4.21.1",
+    "dotenv": "^16.4.5"
   }
 }
