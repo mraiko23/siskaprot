@@ -846,7 +846,7 @@ async function searchInternet(query, maxResults = 5) {
 // 🤖 AI INTEGRATION - OpenRouter
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function callOpenRouter(messages) {
+async function callOpenRouter(messages, imageUrl = null) {
     try {
         const systemPrompt = {
             role: 'system',
@@ -1006,14 +1006,47 @@ async function callOpenRouter(messages) {
 - При простых приветствиях (привет, здравствуй, hi) - просто поздоровайся
 - При вопросах о возможностях - расскажи о них БЕЗ тегов
 - Используй теги ТОЛЬКО когда пользователь явно просит что-то сделать
-- Не создавай базы данных, команды или сайты без явного запроса!`
+- Не создавай базы данных, команды или сайты без явного запроса!
+
+📸 ОБРАБОТКА ИЗОБРАЖЕНИЙ:
+- Когда пользователь отправляет изображение, ты МОЖЕШЬ его видеть и анализировать
+- Детально описывай что видишь на изображении
+- Отвечай на вопросы об изображении
+- Если изображение с подписью - связывай подпись с содержимым`
         };
+
+        // Prepare messages array
+        let messagesArray = [systemPrompt, ...messages];
+        
+        // If there's an image, add it to the last user message
+        if (imageUrl) {
+            console.log('[AI] Adding image to request');
+            // Find the last user message and add image
+            const lastUserMsgIndex = messagesArray.length - 1;
+            if (messagesArray[lastUserMsgIndex].role === 'user') {
+                messagesArray[lastUserMsgIndex] = {
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: messagesArray[lastUserMsgIndex].content
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: {
+                                url: imageUrl
+                            }
+                        }
+                    ]
+                };
+            }
+        }
 
         const response = await axios.post(
             'https://openrouter.ai/api/v1/chat/completions',
             {
                 model: CONFIG.AI_MODEL,
-                messages: [systemPrompt, ...messages],
+                messages: messagesArray,
                 temperature: 0.7,
                 max_tokens: 4000
             },
@@ -1174,99 +1207,128 @@ async function restoreBot(botName, token, code) {
         }
         
         // Create special sandbox for bot with access to store itself
-        const botStorage = { instance: null };
         const sandbox = createSandbox(null);
         sandbox.botToken = token;
         sandbox.botName = botName;
         sandbox.setBotInstance = (bot) => {
-            botStorage.instance = bot;
             cache.runningBots.set(botName, bot);
+            console.log(`[Bot] Instance registered: ${botName}`);
         };
         
-        // Execute bot code
+        // Execute bot code in sandbox
         const context = vm.createContext(sandbox);
-        // Wrap code to automatically store bot instance
+        // Ensure code automatically registers bot instance
         const wrappedCode = `
-            (function() {
+            (async function() {
                 ${code}
-                // Try to find bot instance in scope
-                const possibleBots = Object.keys(this).filter(k => 
-                    this[k] && typeof this[k] === 'object' && this[k].stopPolling
-                );
-                if (possibleBots.length > 0) {
-                    setBotInstance(this[possibleBots[0]]);
+                
+                // Auto-detect and register bot instance
+                // Look for TelegramBot instances in the scope
+                const globalVars = Object.keys(this);
+                for (const varName of globalVars) {
+                    const obj = this[varName];
+                    if (obj && typeof obj === 'object') {
+                        // Check if it's a Telegram bot (has polling methods)
+                        if (typeof obj.stopPolling === 'function' || 
+                            typeof obj.getMe === 'function' ||
+                            typeof obj.sendMessage === 'function') {
+                            console.log('[Bot] Auto-detected bot instance:', varName);
+                            setBotInstance(obj);
+                            break;
+                        }
+                    }
                 }
             }).call(this);
         `;
         const script = new vm.Script(wrappedCode);
-        script.runInContext(context);
+        await script.runInContext(context);
         
-        // Verify bot was stored
+        // Small delay to ensure bot starts polling
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Verify bot was registered
         if (cache.runningBots.has(botName)) {
-            console.log(`[Bot] Restored and running: ${botName}`);
+            console.log(`[Bot] ✅ Restored and running: ${botName}`);
             return true;
         } else {
-            console.warn(`[Bot] Started but instance not captured: ${botName}`);
+            console.warn(`[Bot] ⚠️ Started but instance not captured: ${botName}`);
+            console.warn(`[Bot] Bot code must call setBotInstance(bot) or bot won't be stoppable`);
             return true;
         }
     } catch (error) {
-        console.error(`[Bot] Failed to restore ${botName}:`, error.message);
+        console.error(`[Bot] ❌ Failed to restore ${botName}:`, error.message);
         return false;
     }
 }
 
 async function stopBot(botName) {
     try {
-        if (cache.runningBots.has(botName)) {
-            const botInstance = cache.runningBots.get(botName);
-            
-            // Try multiple methods to stop the bot
-            let stopped = false;
-            
-            // Method 1: stopPolling (Telegram bots)
-            if (botInstance && typeof botInstance.stopPolling === 'function') {
-                try {
-                    await botInstance.stopPolling();
-                    stopped = true;
-                    console.log(`[Bot] Stopped polling for: ${botName}`);
-                } catch (e) {
-                    console.warn(`[Bot] stopPolling failed for ${botName}:`, e.message);
-                }
-            }
-            
-            // Method 2: close (generic bots)
-            if (botInstance && typeof botInstance.close === 'function') {
-                try {
-                    await botInstance.close();
-                    stopped = true;
-                    console.log(`[Bot] Closed connection for: ${botName}`);
-                } catch (e) {
-                    console.warn(`[Bot] close failed for ${botName}:`, e.message);
-                }
-            }
-            
-            // Method 3: disconnect
-            if (botInstance && typeof botInstance.disconnect === 'function') {
-                try {
-                    await botInstance.disconnect();
-                    stopped = true;
-                    console.log(`[Bot] Disconnected: ${botName}`);
-                } catch (e) {
-                    console.warn(`[Bot] disconnect failed for ${botName}:`, e.message);
-                }
-            }
-            
-            // Remove from cache
+        if (!cache.runningBots.has(botName)) {
+            console.log(`[Bot] ⚠️ Not found in running bots: ${botName}`);
+            return false;
+        }
+        
+        const botInstance = cache.runningBots.get(botName);
+        console.log(`[Bot] 🛑 Attempting to stop: ${botName}`);
+        
+        if (!botInstance) {
+            console.warn(`[Bot] ⚠️ Bot instance is null for: ${botName}`);
             cache.runningBots.delete(botName);
-            console.log(`[Bot] Removed from cache: ${botName}`);
+            return false;
+        }
+        
+        let stopped = false;
+        
+        // Method 1: stopPolling (most common for Telegram bots)
+        if (typeof botInstance.stopPolling === 'function') {
+            try {
+                console.log(`[Bot] Calling stopPolling() for: ${botName}`);
+                await botInstance.stopPolling({ cancel: true });
+                stopped = true;
+                console.log(`[Bot] ✅ stopPolling successful: ${botName}`);
+            } catch (e) {
+                console.warn(`[Bot] ⚠️ stopPolling failed for ${botName}:`, e.message);
+            }
+        }
+        
+        // Method 2: close connection
+        if (typeof botInstance.close === 'function') {
+            try {
+                console.log(`[Bot] Calling close() for: ${botName}`);
+                await botInstance.close();
+                stopped = true;
+                console.log(`[Bot] ✅ close successful: ${botName}`);
+            } catch (e) {
+                console.warn(`[Bot] ⚠️ close failed for ${botName}:`, e.message);
+            }
+        }
+        
+        // Method 3: disconnect
+        if (typeof botInstance.disconnect === 'function') {
+            try {
+                console.log(`[Bot] Calling disconnect() for: ${botName}`);
+                await botInstance.disconnect();
+                stopped = true;
+                console.log(`[Bot] ✅ disconnect successful: ${botName}`);
+            } catch (e) {
+                console.warn(`[Bot] ⚠️ disconnect failed for ${botName}:`, e.message);
+            }
+        }
+        
+        // Remove from cache
+        cache.runningBots.delete(botName);
+        console.log(`[Bot] 🗑️ Removed from cache: ${botName}`);
+        
+        if (stopped) {
+            console.log(`[Bot] ✅✅ Successfully stopped: ${botName}`);
             return true;
         } else {
-            console.log(`[Bot] Not running: ${botName}`);
+            console.warn(`[Bot] ⚠️ No stop method worked for: ${botName}`);
             return false;
         }
     } catch (error) {
-        console.error(`[Bot] Failed to stop ${botName}:`, error.message);
-        // Still remove from cache even if stop failed
+        console.error(`[Bot] ❌ Error stopping ${botName}:`, error.message);
+        // Still remove from cache
         cache.runningBots.delete(botName);
         return false;
     }
@@ -2245,15 +2307,54 @@ bot.on('message', async (msg) => {
         const history = getConversationHistory(userId);
         
         let userMessage = text;
+        let imageUrl = null;
+        
+        // Handle images
         if (msg.photo && msg.photo.length > 0) {
-            userMessage += '\n[Пользователь отправил изображение - проанализируй его детально]';
+            try {
+                // Get the largest photo
+                const photo = msg.photo[msg.photo.length - 1];
+                const fileId = photo.file_id;
+                
+                console.log('[Image] Processing photo:', fileId);
+                
+                // Get file path from Telegram
+                const file = await bot.getFile(fileId);
+                const filePath = file.file_path;
+                
+                // Download image from Telegram servers
+                const fileUrl = `https://api.telegram.org/file/bot${CONFIG.TELEGRAM_TOKEN}/${filePath}`;
+                console.log('[Image] Downloading from:', fileUrl);
+                
+                const imageResponse = await axios.get(fileUrl, {
+                    responseType: 'arraybuffer'
+                });
+                
+                // Convert to base64
+                const base64Image = Buffer.from(imageResponse.data, 'binary').toString('base64');
+                const mimeType = imageResponse.headers['content-type'] || 'image/jpeg';
+                imageUrl = `data:${mimeType};base64,${base64Image}`;
+                
+                console.log('[Image] ✅ Processed successfully, size:', base64Image.length, 'bytes');
+                
+                // If no caption provided, use default question
+                if (!text || text.trim() === '') {
+                    userMessage = 'Что на этом изображении?';
+                } else {
+                    userMessage = text;
+                }
+            } catch (imageError) {
+                console.error('[Image] ❌ Failed to process:', imageError.message);
+                await bot.sendMessage(chatId, '⚠️ Не удалось обработать изображение: ' + imageError.message);
+                return;
+            }
         }
         
         addToHistory(userId, 'user', userMessage);
         
         await bot.sendChatAction(chatId, 'typing');
         
-        const aiResponse = await callOpenRouter(history);
+        const aiResponse = await callOpenRouter(history, imageUrl);
         
         const actionsExecuted = await parseAndExecuteActions(aiResponse, chatId, userId);
         
