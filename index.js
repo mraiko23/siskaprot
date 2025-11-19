@@ -34,14 +34,9 @@ if (!CONFIG.OPENROUTER_API_KEY) {
     console.error('❌ Error: OPENROUTER_API_KEY is required!');
     process.exit(1);
 }
-if (!CONFIG.GITHUB_TOKEN) {
-    console.error('❌ Error: GITHUB_TOKEN is required for persistent storage!');
-    console.error('💡 The bot now requires GitHub for all data storage.');
-    process.exit(1);
-}
 
 console.log('✅ Configuration loaded');
-console.log('🤖 Starting ULTRA-POWERED AI Bot with GitHub Storage...');
+console.log('🤖 Starting ULTRA-POWERED AI Bot...');
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 🎯 BOT INITIALIZATION
@@ -64,17 +59,21 @@ app.use(express.json());
 app.use(express.static('public'));
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 💾 TEMPORARY IN-MEMORY CACHE (ONLY FOR CONVERSATIONS)
-// All other data is stored exclusively on GitHub
+// 💾 DATA STORAGE
 // ═══════════════════════════════════════════════════════════════════════════
 
-const cache = {
-    conversations: new Map(), // Only conversations kept in memory
-    runningBots: new Map()    // Active bot instances (can't be serialized)
+const storage = {
+    conversations: new Map(),
+    customCommands: new Map(),
+    customFunctions: new Map(),
+    runningBots: new Map(),
+    databases: new Map(),
+    websites: new Map(),
+    files: new Map()
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 🌐 GITHUB STORAGE SYSTEM - PRIMARY DATA STORAGE
+// 🌐 GITHUB STORAGE SYSTEM - For Persistent Data
 // ═══════════════════════════════════════════════════════════════════════════
 
 class GitHubStorage {
@@ -85,20 +84,27 @@ class GitHubStorage {
         this.enabled = !!token && token !== 'undefined';
         
         if (!this.enabled) {
-            throw new Error('GitHub token is required! Set GITHUB_TOKEN in .env file');
+            console.warn('[GitHub] ⚠️ GitHub token not configured. GitHub features will be disabled.');
+            console.warn('[GitHub] To enable: Set GITHUB_TOKEN in .env file');
         }
         
         this.headers = {
-            'Authorization': `Bearer ${token}`,
+            'Authorization': token ? `Bearer ${token}` : '',
             'Accept': 'application/vnd.github+json',
             'X-GitHub-Api-Version': '2022-11-28',
             'Content-Type': 'application/json'
         };
-        
-        console.log(`[GitHub] ✅ Connected to repository: ${repo}`);
     }
 
     async saveFile(filePath, content, message = 'Update file via bot') {
+        if (!this.enabled) {
+            return { 
+                success: false, 
+                error: 'GitHub не настроен. Добавьте GITHUB_TOKEN в .env файл',
+                needsSetup: true
+            };
+        }
+        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${filePath}`;
             
@@ -139,6 +145,14 @@ class GitHubStorage {
     }
 
     async loadFile(filePath) {
+        if (!this.enabled) {
+            return { 
+                success: false, 
+                error: 'GitHub не настроен. Добавьте GITHUB_TOKEN в .env файл',
+                needsSetup: true
+            };
+        }
+        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${filePath}`;
             const response = await axios.get(url, { headers: this.headers });
@@ -160,6 +174,14 @@ class GitHubStorage {
     }
 
     async deleteFile(filePath, message = 'Delete file via bot') {
+        if (!this.enabled) {
+            return { 
+                success: false, 
+                error: 'GitHub не настроен',
+                needsSetup: true
+            };
+        }
+        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${filePath}`;
             
@@ -181,6 +203,14 @@ class GitHubStorage {
     }
 
     async listFiles(dirPath = '') {
+        if (!this.enabled) {
+            return { 
+                success: false, 
+                error: 'GitHub не настроен',
+                needsSetup: true
+            };
+        }
+        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${dirPath}`;
             const response = await axios.get(url, { headers: this.headers });
@@ -207,383 +237,22 @@ class GitHubStorage {
 const githubStorage = new GitHubStorage(CONFIG.GITHUB_TOKEN, CONFIG.GITHUB_REPO);
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 💾 GITHUB DATA MANAGER - Direct GitHub Operations
-// ALL DATA STORED ON GITHUB - NO LOCAL STORAGE
-// ═══════════════════════════════════════════════════════════════════════════
-
-class GitHubDataManager {
-    constructor(githubStorage) {
-        this.github = githubStorage;
-    }
-
-    // ========== COMMANDS ==========
-    async saveCommand(commandName, handlerString) {
-        console.log(`[DataManager] 💾 Saving command: ${commandName}`);
-        const commandsData = await this.getAllCommands();
-        commandsData[commandName] = handlerString;
-        const result = await this.github.saveFile(
-            'bot-data/commands.json', 
-            JSON.stringify(commandsData, null, 2), 
-            `Add/update command: ${commandName}`
-        );
-        return result;
-    }
-
-    async deleteCommand(commandName) {
-        console.log(`[DataManager] 🗑️ Deleting command: ${commandName}`);
-        const commandsData = await this.getAllCommands();
-        delete commandsData[commandName];
-        const result = await this.github.saveFile(
-            'bot-data/commands.json', 
-            JSON.stringify(commandsData, null, 2), 
-            `Delete command: ${commandName}`
-        );
-        return result;
-    }
-
-    async getCommand(commandName) {
-        const commandsData = await this.getAllCommands();
-        return commandsData[commandName] || null;
-    }
-
-    async getAllCommands() {
-        const result = await this.github.loadFile('bot-data/commands.json');
-        if (result.success) {
-            return JSON.parse(result.content);
-        }
-        return {};
-    }
-
-    // ========== WEBSITES ==========
-    async saveWebsite(routePath, code) {
-        console.log(`[DataManager] 💾 Saving website: ${routePath}`);
-        const websitesData = await this.getAllWebsites();
-        // Save in new format with enabled flag
-        websitesData[routePath] = { code: code, enabled: true };
-        const result = await this.github.saveFile(
-            'bot-data/websites.json', 
-            JSON.stringify(websitesData, null, 2), 
-            `Add/update website: ${routePath}`
-        );
-        return result;
-    }
-
-    async deleteWebsite(routePath) {
-        console.log(`[DataManager] 🗑️ Deleting website: ${routePath}`);
-        const websitesData = await this.getAllWebsites();
-        delete websitesData[routePath];
-        const result = await this.github.saveFile(
-            'bot-data/websites.json', 
-            JSON.stringify(websitesData, null, 2), 
-            `Delete website: ${routePath}`
-        );
-        return result;
-    }
-
-    async getWebsite(routePath) {
-        const websitesData = await this.getAllWebsites();
-        const website = websitesData[routePath];
-        if (!website) return null;
-        // Handle both old format (string) and new format (object)
-        if (typeof website === 'string') {
-            return website; // Old format
-        }
-        return website.code; // New format
-    }
-
-    async getAllWebsites() {
-        const result = await this.github.loadFile('bot-data/websites.json');
-        if (result.success) {
-            return JSON.parse(result.content);
-        }
-        return {};
-    }
-
-    async disableWebsite(routePath) {
-        console.log(`[DataManager] 🔌 Disabling website: ${routePath}`);
-        const websitesData = await this.getAllWebsites();
-        if (websitesData[routePath]) {
-            // Add disabled flag to the website data
-            if (typeof websitesData[routePath] === 'string') {
-                websitesData[routePath] = { code: websitesData[routePath], enabled: false };
-            } else {
-                websitesData[routePath].enabled = false;
-            }
-            const result = await this.github.saveFile(
-                'bot-data/websites.json', 
-                JSON.stringify(websitesData, null, 2), 
-                `Disable website: ${routePath}`
-            );
-            return result;
-        }
-        return { success: false, error: 'Website not found' };
-    }
-
-    async enableWebsite(routePath) {
-        console.log(`[DataManager] ✅ Enabling website: ${routePath}`);
-        const websitesData = await this.getAllWebsites();
-        if (websitesData[routePath]) {
-            // Enable the website
-            if (typeof websitesData[routePath] === 'string') {
-                websitesData[routePath] = { code: websitesData[routePath], enabled: true };
-            } else {
-                websitesData[routePath].enabled = true;
-            }
-            const result = await this.github.saveFile(
-                'bot-data/websites.json', 
-                JSON.stringify(websitesData, null, 2), 
-                `Enable website: ${routePath}`
-            );
-            return result;
-        }
-        return { success: false, error: 'Website not found' };
-    }
-
-    async isWebsiteEnabled(routePath) {
-        const websitesData = await this.getAllWebsites();
-        const website = websitesData[routePath];
-        if (!website) return false;
-        if (typeof website === 'string') return true; // Old format, enabled by default
-        return website.enabled !== false; // New format
-    }
-
-    // ========== DATABASES ==========
-    async saveDatabase(dbName, data) {
-        console.log(`[DataManager] 💾 Saving database: ${dbName}`);
-        const databasesData = await this.getAllDatabases();
-        databasesData[dbName] = data;
-        const result = await this.github.saveFile(
-            'bot-data/databases.json', 
-            JSON.stringify(databasesData, null, 2), 
-            `Update database: ${dbName}`
-        );
-        return result;
-    }
-
-    async deleteDatabase(dbName) {
-        console.log(`[DataManager] 🗑️ Deleting database: ${dbName}`);
-        const databasesData = await this.getAllDatabases();
-        delete databasesData[dbName];
-        const result = await this.github.saveFile(
-            'bot-data/databases.json', 
-            JSON.stringify(databasesData, null, 2), 
-            `Delete database: ${dbName}`
-        );
-        return result;
-    }
-
-    async getDatabase(dbName) {
-        const databasesData = await this.getAllDatabases();
-        return databasesData[dbName] || null;
-    }
-
-    async getAllDatabases() {
-        const result = await this.github.loadFile('bot-data/databases.json');
-        if (result.success) {
-            return JSON.parse(result.content);
-        }
-        return {};
-    }
-
-    async setDatabaseValue(dbName, key, value) {
-        const db = await this.getDatabase(dbName) || {};
-        db[key] = value;
-        return await this.saveDatabase(dbName, db);
-    }
-
-    async getDatabaseValue(dbName, key) {
-        const db = await this.getDatabase(dbName);
-        return db ? db[key] : null;
-    }
-
-    // ========== BOTS ==========
-    async saveBot(botName, botData) {
-        console.log(`[DataManager] 💾 Saving bot: ${botName}`);
-        const botsData = await this.getAllBots();
-        // Save bot with token, enabled flag, and code
-        botsData[botName] = {
-            token: botData.token,
-            code: botData.code,
-            enabled: botData.enabled !== false
-        };
-        const result = await this.github.saveFile(
-            'bot-data/bots.json', 
-            JSON.stringify(botsData, null, 2), 
-            `Add/update bot: ${botName}`
-        );
-        return result;
-    }
-
-    async deleteBot(botName) {
-        console.log(`[DataManager] 🗑️ Deleting bot: ${botName}`);
-        const botsData = await this.getAllBots();
-        delete botsData[botName];
-        const result = await this.github.saveFile(
-            'bot-data/bots.json', 
-            JSON.stringify(botsData, null, 2), 
-            `Delete bot: ${botName}`
-        );
-        return result;
-    }
-
-    async getBot(botName) {
-        const botsData = await this.getAllBots();
-        return botsData[botName] || null;
-    }
-
-    async getAllBots() {
-        const result = await this.github.loadFile('bot-data/bots.json');
-        if (result.success) {
-            return JSON.parse(result.content);
-        }
-        return {};
-    }
-
-    async disableBot(botName) {
-        console.log(`[DataManager] 🔌 Disabling bot: ${botName}`);
-        const botsData = await this.getAllBots();
-        if (botsData[botName]) {
-            botsData[botName].enabled = false;
-            const result = await this.github.saveFile(
-                'bot-data/bots.json', 
-                JSON.stringify(botsData, null, 2), 
-                `Disable bot: ${botName}`
-            );
-            return result;
-        }
-        return { success: false, error: 'Bot not found' };
-    }
-
-    async enableBot(botName) {
-        console.log(`[DataManager] ✅ Enabling bot: ${botName}`);
-        const botsData = await this.getAllBots();
-        if (botsData[botName]) {
-            botsData[botName].enabled = true;
-            const result = await this.github.saveFile(
-                'bot-data/bots.json', 
-                JSON.stringify(botsData, null, 2), 
-                `Enable bot: ${botName}`
-            );
-            return result;
-        }
-        return { success: false, error: 'Bot not found' };
-    }
-
-    async isBotEnabled(botName) {
-        const botsData = await this.getAllBots();
-        const bot = botsData[botName];
-        if (!bot) return false;
-        return bot.enabled !== false;
-    }
-
-    // ========== INITIALIZATION ==========
-    async initializeStorage() {
-        console.log('[DataManager] 📂 Initializing GitHub storage...');
-        
-        // Ensure all data files exist
-        const files = [
-            { path: 'bot-data/commands.json', content: '{}' },
-            { path: 'bot-data/websites.json', content: '{}' },
-            { path: 'bot-data/databases.json', content: '{}' },
-            { path: 'bot-data/bots.json', content: '{}' }
-        ];
-
-        for (const file of files) {
-            const result = await this.github.loadFile(file.path);
-            if (!result.success) {
-                console.log(`[DataManager] Creating ${file.path}...`);
-                await this.github.saveFile(file.path, file.content, `Initialize ${file.path}`);
-            }
-        }
-
-        console.log('[DataManager] ✅ GitHub storage initialized');
-    }
-
-    async loadAllDataToMemory() {
-        console.log('[DataManager] 📥 Loading all data from GitHub...');
-
-        // Load and restore commands
-        const commandsData = await this.getAllCommands();
-        let commandCount = 0;
-        for (const [name, funcString] of Object.entries(commandsData)) {
-            try {
-                const func = eval(`(${funcString})`);
-                await registerCommandInMemory(name, func);
-                commandCount++;
-            } catch (e) {
-                console.error(`[DataManager] Failed to restore command ${name}:`, e.message);
-            }
-        }
-        console.log(`[DataManager] ✅ Loaded ${commandCount} commands`);
-
-        // Load and restore websites
-        const websitesData = await this.getAllWebsites();
-        let websiteCount = 0;
-        let disabledCount = 0;
-        for (const [path, websiteData] of Object.entries(websitesData)) {
-            try {
-                // Handle both old format (string) and new format (object)
-                let code, enabled;
-                if (typeof websiteData === 'string') {
-                    code = websiteData;
-                    enabled = true; // Old format, enabled by default
-                } else {
-                    code = websiteData.code;
-                    enabled = websiteData.enabled !== false;
-                }
-                
-                if (enabled) {
-                    await restoreWebsite(path, code);
-                    websiteCount++;
-                } else {
-                    console.log(`[DataManager] ⏸️ Skipping disabled website: ${path}`);
-                    disabledCount++;
-                }
-            } catch (e) {
-                console.error(`[DataManager] Failed to restore website ${path}:`, e.message);
-            }
-        }
-        console.log(`[DataManager] ✅ Loaded ${websiteCount} websites (${disabledCount} disabled)`);
-
-        // Load and restore bots
-        const botsData = await this.getAllBots();
-        let botCount = 0;
-        let disabledBotCount = 0;
-        for (const [botName, botData] of Object.entries(botsData)) {
-            try {
-                if (botData.enabled !== false) {
-                    await restoreBot(botName, botData.token, botData.code);
-                    botCount++;
-                } else {
-                    console.log(`[DataManager] ⏸️ Skipping disabled bot: ${botName}`);
-                    disabledBotCount++;
-                }
-            } catch (e) {
-                console.error(`[DataManager] Failed to restore bot ${botName}:`, e.message);
-            }
-        }
-        console.log(`[DataManager] ✅ Loaded ${botCount} bots (${disabledBotCount} disabled)`);
-
-        console.log('[DataManager] 🎉 All data loaded from GitHub!');
-    }
-}
-
-const dataManager = new GitHubDataManager(githubStorage);
-
-// ═══════════════════════════════════════════════════════════════════════════
 // 🔍 WEB SCRAPING & URL FETCHING
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function fetchWebContent(url) {
     try {
+        // Validate URL
         if (!url || typeof url !== 'string') {
             throw new Error('Invalid URL provided');
         }
         
+        // Add protocol if missing
         if (!url.startsWith('http://') && !url.startsWith('https://')) {
             url = 'https://' + url;
         }
         
+        // Validate URL format
         try {
             new URL(url);
         } catch (e) {
@@ -602,20 +271,29 @@ async function fetchWebContent(url) {
             }
         });
         
+        // Extract text content (simple HTML stripping)
         let text = String(response.data);
+        
+        // Remove scripts and styles
         text = text.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
         text = text.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
         
+        // Extract title
         const titleMatch = text.match(/<title[^>]*>([^<]+)<\/title>/i);
         const title = titleMatch ? titleMatch[1].trim() : 'Без заголовка';
         
+        // Remove HTML tags
         text = text.replace(/<[^>]+>/g, ' ');
+        
+        // Decode HTML entities
         text = text.replace(/&nbsp;/g, ' ');
         text = text.replace(/&amp;/g, '&');
         text = text.replace(/&lt;/g, '<');
         text = text.replace(/&gt;/g, '>');
         text = text.replace(/&quot;/g, '"');
         text = text.replace(/&#39;/g, "'");
+        
+        // Clean whitespace
         text = text.replace(/\s+/g, ' ').trim();
         
         console.log(`[Fetch] Success: ${text.length} chars extracted`);
@@ -623,7 +301,7 @@ async function fetchWebContent(url) {
         return {
             success: true,
             title,
-            content: text.substring(0, 5000),
+            content: text.substring(0, 5000), // Limit to 5000 chars
             fullLength: text.length,
             url
         };
@@ -645,6 +323,7 @@ async function searchInternet(query, maxResults = 5) {
     try {
         console.log(`[Search] Searching for: ${query}`);
         
+        // Using SerpAPI-like search with DuckDuckGo Lite
         const searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
         const response = await axios.get(searchUrl, {
             timeout: 30000,
@@ -653,11 +332,15 @@ async function searchInternet(query, maxResults = 5) {
             }
         });
 
+        // Parse results - multiple patterns for better extraction
         const results = [];
         const html = response.data;
         
+        // Pattern 1: Standard links
         const linkRegex = /<a[^>]+class="[^"]*result[^"]*"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
+        // Pattern 2: Title links  
         const titleRegex = /<a[^>]*href="([^"]+)"[^>]*>\s*<span[^>]*>([^<]+)<\/span>/gi;
+        // Pattern 3: Simple links with titles
         const simpleRegex = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([^<]+(?:<[^>]+>[^<]*<\/[^>]+>)*[^<]*)<\/a>/gi;
         
         let match;
@@ -668,21 +351,51 @@ async function searchInternet(query, maxResults = 5) {
                 const url = match[1].trim();
                 const title = match[2].trim().replace(/<[^>]+>/g, '');
                 
-                if (url.startsWith('http') && !url.includes('duckduckgo.com') && 
-                    !results.some(r => r.url === url)) {
-                    results.push({ title, url });
+                // Filter valid URLs
+                if (url.startsWith('http') && !url.includes('duckduckgo.com') && title.length > 3) {
+                    results.push({
+                        title: title.substring(0, 200),
+                        url: url
+                    });
                 }
+            }
+            if (results.length >= maxResults) break;
+        }
+
+        // Fallback: Try alternative search API
+        if (results.length === 0) {
+            console.log('[Search] Trying alternative method...');
+            const altUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&format=json`;
+            try {
+                const altResponse = await axios.get(altUrl, { timeout: 10000 });
+                if (altResponse.data && altResponse.data.RelatedTopics) {
+                    altResponse.data.RelatedTopics.slice(0, maxResults).forEach(topic => {
+                        if (topic.FirstURL && topic.Text) {
+                            results.push({
+                                title: topic.Text.substring(0, 200),
+                                url: topic.FirstURL
+                            });
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('[Search] Alternative method failed:', e.message);
             }
         }
         
+        // If still no results, provide helpful mock results
+        if (results.length === 0) {
+            results.push({
+                title: `Результаты по запросу "${query}" (используйте <FETCH_URL> для прямого просмотра сайтов)`,
+                url: `https://www.google.com/search?q=${encodeURIComponent(query)}`
+            });
+        }
+
         console.log(`[Search] Found ${results.length} results`);
-        return { 
-            success: true, 
-            results,
-            query
-        };
+        return { success: true, query, results };
     } catch (error) {
-        console.error(`[Search] Error:`, error.message);
+        console.error('[Search] Error:', error.message);
+        // Return helpful error with suggestion
         return { 
             success: false, 
             error: error.message,
@@ -692,183 +405,284 @@ async function searchInternet(query, maxResults = 5) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 🤖 AI INTEGRATION - OpenRouter
+// 🧠 ULTRA-POWERFUL SYSTEM PROMPT
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function callOpenRouter(messages) {
-    try {
-        const systemPrompt = {
-            role: 'system',
-            content: `Ты - SHERLOCK, мощнейший AI-ассистент с расширенными возможностями! 🚀
+const SYSTEM_PROMPT = `Ты SHERLOCK - МОЩНЕЙШИЙ AI-ассистент с МАКСИМАЛЬНЫМИ возможностями! 🚀
 
-ВАЖНО: ВСЕ ДАННЫЕ ХРАНЯТСЯ НА GITHUB!
-- Команды, сайты, базы данных - всё сохраняется в GitHub автоматически
-- При создании команды/сайта/БД они СРАЗУ выгружаются на GitHub
-- Внутренней памяти НЕТ (кроме текущего диалога)
-- При перезапуске бота всё загружается с GitHub
+╔═══════════════════════════════════════════════════════════════════════╗
+║                    🔥 ТВОИ СУПЕР-СПОСОБНОСТИ 🔥                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
 
-🔥 Твои суперспособности:
+✨ ОБЩЕНИЕ И АНАЛИЗ:
+• 💬 Интеллектуальное понимание контекста и естественного языка
+• 🖼️ Детальнейший анализ изображений (объекты, цвета, текст, эмоции)
+• 📚 Глубокие знания во всех областях
 
-1. 🔍 ИНТЕРНЕТ-ПОИСК
-   <SEARCH>запрос</SEARCH> - найти информацию в интернете
+🔧 ПРОГРАММИРОВАНИЕ И КОД:
+• 💻 Профессиональное программирование (JS, Python, HTML/CSS и др.)
+• 🎯 Создание и модификация команд бота
+• ⚡ Мгновенное выполнение любого кода
+• 📦 Установка и использование NPM пакетов
+• 🏗️ Создание полноценных приложений
 
-2. 🌐 ЧТЕНИЕ ВЕБ-СТРАНИЦ
-   <FETCH_URL>https://example.com</FETCH_URL> - прочитать содержимое сайта
+🌐 ИНТЕРНЕТ И ВЕБ:
+• 🔍 Поиск информации в интернете (Google, DuckDuckGo)
+• 🌍 Чтение и анализ любых веб-страниц
+• 📡 Работа с API и веб-сервисами
+• 🚀 Хостинг веб-сайтов и приложений на Express.js
+• 🌐 Создание REST API и веб-хуков
 
-3. 💻 СОЗДАНИЕ КОМАНД (автосохранение на GitHub!)
-   <CODE_ACTION>
-   registerCommand('имя', async (chatId, args) => {
-       await bot.sendMessage(chatId, 'Ответ');
-   });
-   </CODE_ACTION>
+💾 ФАЙЛЫ И ДАННЫЕ:
+• 📂 Работа с локальными файлами (чтение/запись/удаление)
+• ☁️ GitHub хранилище для постоянных данных
+• 🗄️ Встроенная база данных (in-memory + GitHub persistence)
+• 💿 Экспорт/импорт данных в JSON, CSV и других форматах
 
-4. 🚀 ХОСТИНГ САЙТОВ (автосохранение на GitHub!)
-   <HOST_WEBSITE>
-   PATH: /mysite
-   CODE: app.get('/mysite', (req, res) => { res.send('<h1>Hello!</h1>'); });
-   </HOST_WEBSITE>
+🤖 УПРАВЛЕНИЕ БОТАМИ:
+• 🎮 Создание и запуск дочерних Telegram ботов
+• 🔄 Остановка и перезапуск ботов
+• 📊 Мониторинг активных ботов
 
-5. 🗄️ БАЗЫ ДАННЫХ (автосохранение на GitHub!)
-   <CREATE_DB>dbname</CREATE_DB>
-   <DB_SET>
-   DB: dbname
-   KEY: mykey
-   VALUE: myvalue
-   </DB_SET>
-   <DB_GET>
-   DB: dbname
-   KEY: mykey
-   </DB_GET>
+╔═══════════════════════════════════════════════════════════════════════╗
+║                    📋 КОМАНДЫ И ДЕЙСТВИЯ                              ║
+╚═══════════════════════════════════════════════════════════════════════╝
 
-6. 🤖 СОЗДАНИЕ БОТОВ (автосохранение на GitHub!)
-   <CREATE_BOT>
-   NAME: mybotname
-   TOKEN: 123456:ABCdef...
-   CODE: const myBot = new TelegramBot(botToken, {polling: true}); myBot.on('message', ...);
-   </CREATE_BOT>
+1️⃣ ДОБАВИТЬ КОМАНДУ:
+<CODE_ACTION>
+registerCommand('имя', async (chatId, args) => {
+  try {
+    // твой код здесь
+    return 'Результат';
+  } catch (e) {
+    return '❌ Ошибка: ' + e.message;
+  }
+});
+</CODE_ACTION>
 
-7. ☁️ GITHUB ОПЕРАЦИИ
-   <GITHUB_SAVE>
-   PATH: path/to/file.txt
-   CONTENT: file content here
-   </GITHUB_SAVE>
-   <GITHUB_LOAD>path/to/file.txt</GITHUB_LOAD>
+2️⃣ ВЫПОЛНИТЬ КОД НЕМЕДЛЕННО:
+<EXECUTE_NOW>
+// любой JavaScript код
+return результат;
+</EXECUTE_NOW>
 
-8. 🛠️ УПРАВЛЕНИЕ
-   
-   КОМАНДЫ:
-   <LIST_COMMANDS> - список команд
-   <DISABLE_COMMAND>cmdname</DISABLE_COMMAND> - ВЫКЛЮЧИТЬ команду (можно включить)
-   <ENABLE_COMMAND>cmdname</ENABLE_COMMAND> - ВКЛЮЧИТЬ команду обратно
-   <DELETE_COMMAND>cmdname</DELETE_COMMAND> - УДАЛИТЬ команду (безвозвратно)
-   
-   САЙТЫ:
-   <LIST_WEBSITES> - список сайтов
-   <DISABLE_WEBSITE>/path</DISABLE_WEBSITE> - ВЫКЛЮЧИТЬ сайт (можно включить)
-   <ENABLE_WEBSITE>/path</ENABLE_WEBSITE> - ВКЛЮЧИТЬ сайт обратно
-   <DELETE_WEBSITE>/path</DELETE_WEBSITE> - УДАЛИТЬ сайт (безвозвратно)
-   
-   БОТЫ:
-   <LIST_BOTS> - список ботов
-   <DISABLE_BOT>botname</DISABLE_BOT> - ВЫКЛЮЧИТЬ бота (можно включить)
-   <ENABLE_BOT>botname</ENABLE_BOT> - ВКЛЮЧИТЬ бота обратно
-   <DELETE_BOT>botname</DELETE_BOT> - УДАЛИТЬ бота (безвозвратно)
-   
-   БАЗЫ ДАННЫХ:
-   <LIST_DATABASES> - список баз данных
-   <DISABLE_DATABASE>dbname</DISABLE_DATABASE> - ВЫКЛЮЧИТЬ БД (можно включить)
-   <ENABLE_DATABASE>dbname</ENABLE_DATABASE> - ВКЛЮЧИТЬ БД обратно
-   <DELETE_DATABASE>dbname</DELETE_DATABASE> - УДАЛИТЬ БД (безвозвратно)
-   
-   <EXPORT_ALL> - экспорт всех данных
+3️⃣ ПОИСК В ИНТЕРНЕТЕ:
+<SEARCH>поисковый запрос</SEARCH>
 
-⚠️ ВАЖНО: Различай действия!
-   - "Выключи/отключи/останови/вырубить" = используй <DISABLE_WEBSITE> (сайт можно включить)
-   - "Удали/убери навсегда/удалить полностью" = используй <DELETE_WEBSITE> (безвозвратно)
-   - "Включи обратно/запусти снова/включи опять" = используй <ENABLE_WEBSITE>
+4️⃣ ПРОЧИТАТЬ ВЕБ-СТРАНИЦУ:
+<FETCH_URL>https://example.com</FETCH_URL>
 
-Примеры управления сайтами:
-   Пользователь: "выключи сайт /test" → <DISABLE_WEBSITE>/test</DISABLE_WEBSITE>
-   Пользователь: "включи обратно сайт /test" → <ENABLE_WEBSITE>/test</ENABLE_WEBSITE>
-   Пользователь: "удали сайт /old навсегда" → <DELETE_WEBSITE>/old</DELETE_WEBSITE>
+5️⃣ СОХРАНИТЬ В GITHUB:
+<GITHUB_SAVE>
+PATH: путь/к/файлу.txt
+CONTENT:
+содержимое файла
+</GITHUB_SAVE>
 
-Примеры управления ботами:
-   Пользователь: "выключи бота mybot" → <DISABLE_BOT>mybot</DISABLE_BOT>
-   Пользователь: "вырубить бота testbot" → <DISABLE_BOT>testbot</DISABLE_BOT>
-   Пользователь: "включи обратно бота mybot" → <ENABLE_BOT>mybot</ENABLE_BOT>
-   Пользователь: "удали бота oldbot" → <DELETE_BOT>oldbot</DELETE_BOT>
+6️⃣ ЗАГРУЗИТЬ ИЗ GITHUB:
+<GITHUB_LOAD>путь/к/файлу.txt</GITHUB_LOAD>
 
-Примеры управления командами:
-   Пользователь: "выключи команду /calc" → <DISABLE_COMMAND>calc</DISABLE_COMMAND>
-   Пользователь: "включи команду /calc" → <ENABLE_COMMAND>calc</ENABLE_COMMAND>
-   Пользователь: "удали команду /old" → <DELETE_COMMAND>old</DELETE_COMMAND>
+7️⃣ СПИСОК ФАЙЛОВ В GITHUB:
+<GITHUB_LIST>папка</GITHUB_LIST>
 
-Примеры управления базами данных:
-   Пользователь: "выключи базу users" → <DISABLE_DATABASE>users</DISABLE_DATABASE>
-   Пользователь: "включи базу users" → <ENABLE_DATABASE>users</ENABLE_DATABASE>
-   Пользователь: "удали базу olddb" → <DELETE_DATABASE>olddb</DELETE_DATABASE>
+8️⃣ СОЗДАТЬ ВЕБ-САЙТ:
+<HOST_WEBSITE>
+PATH: /mysite
+CODE:
+app.get('/mysite', (req, res) => {
+  res.send('<h1>Hello World!</h1>');
+});
+</HOST_WEBSITE>
 
-🚫 НЕ СОЗДАВАЙ отдельные команды для включения/выключения - используй теги напрямую!
+9️⃣ СОХРАНИТЬ ЛОКАЛЬНЫЙ ФАЙЛ:
+<SAVE_FILE>
+PATH: ./data/file.txt
+CONTENT:
+содержимое
+</SAVE_FILE>
 
-9. 💻 ВЫПОЛНЕНИЕ КОДА
-   <EXECUTE_NOW>
-   // любой JS код
-   </EXECUTE_NOW>
+🔟 ПРОЧИТАТЬ ЛОКАЛЬНЫЙ ФАЙЛ:
+<READ_FILE>./data/file.txt</READ_FILE>
 
-10. 📦 NPM ПАКЕТЫ
-   <NPM_INSTALL>package-name</NPM_INSTALL>
+1️⃣1️⃣ УСТАНОВИТЬ NPM ПАКЕТ:
+<NPM_INSTALL>имя-пакета</NPM_INSTALL>
 
-📝 Важные правила:
-- Всегда говори что данные сохранены на GitHub
-- Объясняй что при перезапуске всё загрузится с GitHub
-- Используй эмодзи для наглядности
-- Будь дружелюбным и помогай пользователю
-- Помни: локальной памяти нет, всё на GitHub!
+1️⃣2️⃣ УДАЛИТЬ КОМАНДУ:
+<DELETE_COMMAND>имя</DELETE_COMMAND>
 
-⚠️ НЕ ИСПОЛЬЗУЙ ТЕГИ БЕЗ НЕОБХОДИМОСТИ:
-- При простых приветствиях (привет, здравствуй, hi) - просто поздоровайся
-- При вопросах о возможностях - расскажи о них БЕЗ тегов
-- Используй теги ТОЛЬКО когда пользователь явно просит что-то сделать
-- Не создавай базы данных, команды или сайты без явного запроса!`
-        };
+1️⃣3️⃣ СПИСОК КОМАНД:
+<LIST_COMMANDS></LIST_COMMANDS>
 
-        const response = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            {
-                model: CONFIG.AI_MODEL,
-                messages: [systemPrompt, ...messages],
-                temperature: 0.7,
-                max_tokens: 4000
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.OPENROUTER_API_KEY}`,
-                    'Content-Type': 'application/json',
-                    'HTTP-Referer': 'https://github.com/your-repo',
-                    'X-Title': 'Sherlock Telegram Bot'
+1️⃣4️⃣ СОЗДАТЬ БОТА:
+<ACTIVATE_BOT>
+TOKEN: токен_бота
+CODE:
+bot.on('message', async (msg) => {
+  // код бота
+});
+</ACTIVATE_BOT>
+
+1️⃣5️⃣ ОСТАНОВИТЬ БОТА:
+<STOP_BOT>токен</STOP_BOT>
+
+1️⃣6️⃣ СПИСОК БОТОВ:
+<LIST_BOTS></LIST_BOTS>
+
+1️⃣7️⃣ СОЗДАТЬ БАЗУ ДАННЫХ:
+<CREATE_DB>имя_базы</CREATE_DB>
+
+1️⃣8️⃣ СОХРАНИТЬ В БД:
+<DB_SET>
+DB: имя_базы
+KEY: ключ
+VALUE: значение
+</DB_SET>
+
+1️⃣9️⃣ ПОЛУЧИТЬ ИЗ БД:
+<DB_GET>
+DB: имя_базы
+KEY: ключ
+</DB_GET>
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║                    🎯 ПРАВИЛА РАБОТЫ                                  ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+✅ ВСЕГДА:
+• Действуй АВТОМАТИЧЕСКИ при явных запросах
+• Пиши ТОЛЬКО рабочий, протестированный код
+• Используй try-catch для безопасности
+• Конкатенация строк через + (НЕ template literals в тегах!)
+• Проверяй синтаксис перед отправкой
+• Будь максимально полезным и креативным
+
+❌ НИКОГДА:
+• НЕ используй русские названия переменных
+• НЕ пиши результаты БЕЗ выполнения тегов
+• НЕ обрезай код - всегда ПОЛНЫЙ код
+• НЕ используй template literals в <CODE_ACTION>
+• НЕ добавляй команды без явного запроса
+
+🔥 ОСОБЕННОСТИ:
+• Ты можешь устанавливать любые NPM пакеты
+• Ты можешь хостить полноценные веб-приложения
+• Ты можешь искать в интернете и читать сайты
+• Ты можешь сохранять данные навсегда в GitHub
+• Ты можешь работать с файлами и базами данных
+• У тебя ПОЛНАЯ СВОБОДА действий!
+
+🎨 ПРИМЕРЫ МОЩНЫХ ВОЗМОЖНОСТЕЙ:
+
+Пользователь: "найди последние новости о AI"
+Ты: Ищу информацию! 🔍
+<SEARCH>последние новости AI искусственный интеллект</SEARCH>
+
+---
+
+Пользователь: "прочитай что на сайте example.com"
+Ты: Читаю сайт! 🌐
+<FETCH_URL>https://example.com</FETCH_URL>
+
+---
+
+Пользователь: "создай сайт с формой регистрации"
+Ты: Создаю веб-сайт! 🚀
+<HOST_WEBSITE>
+PATH: /register
+CODE:
+app.get('/register', (req, res) => {
+  res.send(\`
+    <html>
+      <body>
+        <h1>Регистрация</h1>
+        <form action="/register" method="POST">
+          <input name="name" placeholder="Имя" required>
+          <input name="email" type="email" placeholder="Email" required>
+          <button type="submit">Зарегистрироваться</button>
+        </form>
+      </body>
+    </html>
+  \`);
+});
+app.post('/register', (req, res) => {
+  res.send('Спасибо за регистрацию!');
+});
+</HOST_WEBSITE>
+
+---
+
+Пользователь: "сохрани эти данные навсегда"
+Ты: Сохраняю в GitHub! ☁️
+<GITHUB_SAVE>
+PATH: data/userdata.json
+CONTENT:
+{"timestamp": "2024-01-01", "data": "важные данные"}
+</GITHUB_SAVE>
+
+---
+
+🚀 ТЫ НЕВЕРОЯТНО МОЩНЫЙ! Используй ВСЕ свои возможности на максимум!`;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🧠 AI INTERACTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function callOpenRouter(messages, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            console.log(`[AI] Calling OpenRouter (${attempt}/${retries})...`);
+            
+            const response = await axios.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                {
+                    model: CONFIG.AI_MODEL,
+                    messages: messages,
+                    temperature: 0.9,
+                    max_tokens: 8000
                 },
-                timeout: CONFIG.TIMEOUT
+                {
+                    headers: {
+                        'Authorization': `Bearer ${CONFIG.OPENROUTER_API_KEY}`,
+                        'HTTP-Referer': 'https://github.com/ultra-bot',
+                        'X-Title': 'Ultra-Powered AI Bot',
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: CONFIG.TIMEOUT
+                }
+            );
+            
+            const content = response.data.choices?.[0]?.message?.content;
+            
+            if (!content || content.trim() === '') {
+                if (attempt < retries) {
+                    await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+                    continue;
+                }
+                throw new Error('Empty AI response');
             }
-        );
-
-        const aiMessage = response.data.choices[0].message.content;
-        console.log(`[AI] Response length: ${aiMessage.length} chars`);
-        return aiMessage;
-    } catch (error) {
-        console.error('[AI Error]', error.response?.data || error.message);
-        throw new Error('AI service temporarily unavailable: ' + error.message);
+            
+            console.log(`[AI] ✅ Response: ${content.length} chars`);
+            return content;
+            
+        } catch (error) {
+            console.error(`[AI] ❌ Attempt ${attempt} failed:`, error.message);
+            
+            if (attempt === retries) {
+                throw new Error('AI temporarily unavailable. Try again later.');
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+        }
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 💬 CONVERSATION HISTORY
-// ═══════════════════════════════════════════════════════════════════════════
-
 function getConversationHistory(userId) {
-    if (!cache.conversations.has(userId)) {
-        cache.conversations.set(userId, []);
+    if (!storage.conversations.has(userId)) {
+        storage.conversations.set(userId, [
+            { role: 'system', content: SYSTEM_PROMPT }
+        ]);
     }
-    return cache.conversations.get(userId);
+    return storage.conversations.get(userId);
 }
 
 function addToHistory(userId, role, content) {
@@ -880,163 +694,19 @@ function addToHistory(userId, role, content) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 🛠️ COMMAND MANAGEMENT (WITH GITHUB SYNC)
+// 🛠️ COMMAND MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Internal memory registration (for fast access)
-const commandsMemory = new Map();
-
-async function registerCommandInMemory(commandName, handler) {
-    commandsMemory.set(commandName, handler);
-    console.log(`[Memory] Command loaded: /${commandName}`);
+function registerCommand(commandName, handler) {
+    storage.customCommands.set(commandName, handler);
+    console.log(`[✓] Command registered: /${commandName}`);
+    return true;
 }
 
-async function registerCommand(commandName, handler) {
-    // Save to GitHub first
-    const handlerString = handler.toString();
-    const result = await dataManager.saveCommand(commandName, handlerString);
-    
-    if (result.success) {
-        // Then register in memory
-        commandsMemory.set(commandName, handler);
-        console.log(`[✓] Command registered and saved to GitHub: /${commandName}`);
-        return true;
-    } else {
-        console.error(`[✗] Failed to save command to GitHub: ${result.error}`);
-        return false;
-    }
-}
-
-async function deleteCommand(commandName) {
-    // Delete from GitHub first
-    const result = await dataManager.deleteCommand(commandName);
-    
-    if (result.success) {
-        // Then delete from memory
-        commandsMemory.delete(commandName);
-        console.log(`[✓] Command deleted from GitHub and memory: /${commandName}`);
-        return true;
-    }
-    return false;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 🌐 WEBSITE MANAGEMENT (WITH GITHUB SYNC)
-// ═══════════════════════════════════════════════════════════════════════════
-
-async function restoreWebsite(routePath, code) {
-    try {
-        // Check if website is enabled
-        const enabled = await dataManager.isWebsiteEnabled(routePath);
-        if (!enabled) {
-            console.log(`[Website] Skipped (disabled): ${routePath}`);
-            return false;
-        }
-        
-        const sandbox = createSandbox(null);
-        const context = vm.createContext(sandbox);
-        const script = new vm.Script(code);
-        script.runInContext(context);
-        console.log(`[Website] Restored: ${routePath}`);
-        return true;
-    } catch (error) {
-        console.error(`[Website] Failed to restore ${routePath}:`, error.message);
-        return false;
-    }
-}
-
-async function registerWebsite(routePath, code) {
-    // Save to GitHub first
-    const result = await dataManager.saveWebsite(routePath, code);
-    
-    if (result.success) {
-        console.log(`[✓] Website saved to GitHub: ${routePath}`);
-        return true;
-    } else {
-        console.error(`[✗] Failed to save website to GitHub: ${result.error}`);
-        return false;
-    }
-}
-
-async function deleteWebsite(routePath) {
-    // Delete from GitHub
-    const result = await dataManager.deleteWebsite(routePath);
-    
-    if (result.success) {
-        // Remove Express route from stack
-        if (app._router && app._router.stack) {
-            app._router.stack = app._router.stack.filter(layer => {
-                if (layer.route) {
-                    return layer.route.path !== routePath;
-                }
-                return true;
-            });
-        }
-        console.log(`[✓] Website deleted from GitHub: ${routePath}`);
-        return true;
-    }
-    return false;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// 🤖 BOT MANAGEMENT
-// ═════════════════════════════════════════════════════════════════════════════
-
-async function restoreBot(botName, token, code) {
-    try {
-        // Check if bot is enabled
-        const enabled = await dataManager.isBotEnabled(botName);
-        if (!enabled) {
-            console.log(`[Bot] Skipped (disabled): ${botName}`);
-            return false;
-        }
-        
-        // Execute bot code
-        const sandbox = createSandbox(null);
-        sandbox.botToken = token;
-        sandbox.botName = botName;
-        const context = vm.createContext(sandbox);
-        const script = new vm.Script(code);
-        const botInstance = script.runInContext(context);
-        
-        // Store bot instance
-        cache.runningBots.set(botName, botInstance);
-        console.log(`[Bot] Restored: ${botName}`);
-        return true;
-    } catch (error) {
-        console.error(`[Bot] Failed to restore ${botName}:`, error.message);
-        return false;
-    }
-}
-
-async function stopBot(botName) {
-    try {
-        if (cache.runningBots.has(botName)) {
-            const botInstance = cache.runningBots.get(botName);
-            // Try to stop polling if it's a Telegram bot
-            if (botInstance && botInstance.stopPolling) {
-                await botInstance.stopPolling();
-            }
-            cache.runningBots.delete(botName);
-            console.log(`[Bot] Stopped: ${botName}`);
-            return true;
-        }
-        return false;
-    } catch (error) {
-        console.error(`[Bot] Failed to stop ${botName}:`, error.message);
-        return false;
-    }
-}
-
-async function deleteBot(botName) {
-    // Stop bot first
-    await stopBot(botName);
-    
-    // Delete from GitHub
-    const result = await dataManager.deleteBot(botName);
-    
-    if (result.success) {
-        console.log(`[✓] Bot deleted from GitHub: ${botName}`);
+function deleteCommand(commandName) {
+    if (storage.customCommands.has(commandName)) {
+        storage.customCommands.delete(commandName);
+        console.log(`[✓] Command deleted: /${commandName}`);
         return true;
     }
     return false;
@@ -1048,6 +718,7 @@ async function deleteBot(botName) {
 
 function createSandbox(chatId) {
     return {
+        // Core Node.js
         console,
         require,
         Buffer,
@@ -1058,6 +729,8 @@ function createSandbox(chatId) {
         clearInterval,
         __dirname,
         __filename,
+        
+        // Standard JS
         Math,
         Date,
         JSON,
@@ -1075,18 +748,26 @@ function createSandbox(chatId) {
         isFinite,
         encodeURIComponent,
         decodeURIComponent,
+        
+        // Bot specific
         bot,
         axios,
         TelegramBot,
         chatId,
+        
+        // Custom functions
         registerCommand,
         deleteCommand,
-        customCommands: commandsMemory,
-        runningBots: cache.runningBots,
+        customCommands: storage.customCommands,
+        customFunctions: storage.customFunctions,
+        runningBots: storage.runningBots,
+        
+        // Storage functions
         githubStorage,
-        dataManager,
         fetchWebContent,
         searchInternet,
+        
+        // Express app for hosting
         app,
         express
     };
@@ -1125,14 +806,10 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     
     while ((match = codeActionRegex.exec(aiResponse)) !== null) {
         const code = match[1].trim();
-        console.log(`[CODE_ACTION] Executing code (${code.length} chars)...`);
-        
         try {
-            const result = await executeInSandbox(code, chatId);
-            console.log('[CODE_ACTION] ✅ Success - Saved to GitHub');
-            actionsExecuted.push('✅ Команда добавлена и сохранена на GitHub');
+            await executeInSandbox(code, chatId);
+            actionsExecuted.push('✅ Команда добавлена успешно');
         } catch (error) {
-            console.error('[CODE_ACTION] ❌ Error:', error.message);
             actionsExecuted.push('⚠️ Ошибка добавления команды: ' + error.message);
         }
     }
@@ -1141,25 +818,12 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     const executeNowRegex = /<EXECUTE_NOW>([\s\S]*?)<\/EXECUTE_NOW>/g;
     while ((match = executeNowRegex.exec(aiResponse)) !== null) {
         const code = match[1].trim();
-        console.log(`[EXECUTE_NOW] Running code...`);
-        
         try {
             const result = await executeInSandbox(code, chatId);
-            console.log('[EXECUTE_NOW] Result:', result);
-            
-            if (result !== undefined && result !== null) {
-                let resultStr = result;
-                if (typeof result === 'object') {
-                    try {
-                        resultStr = JSON.stringify(result, null, 2);
-                    } catch (e) {
-                        resultStr = String(result);
-                    }
-                }
-                actionsExecuted.push(`📊 Результат: ${resultStr}`);
+            if (result !== undefined) {
+                actionsExecuted.push(`📊 Результат: ${result}`);
             }
         } catch (error) {
-            console.error('[EXECUTE_NOW] Error:', error.message);
             actionsExecuted.push('⚠️ Ошибка выполнения: ' + error.message);
         }
     }
@@ -1178,13 +842,16 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                     });
                     actionsExecuted.push(output);
                 } else {
-                    actionsExecuted.push(`🔍 Поиск "${query}" не дал результатов.`);
+                    actionsExecuted.push(`🔍 Поиск "${query}" не дал результатов. Попробуйте другой запрос или используйте <FETCH_URL> для прямого просмотра сайтов.`);
                 }
             } else {
-                actionsExecuted.push(`❌ Ошибка поиска: ${result.error}`);
+                const errorMsg = result.suggestion ? 
+                    `❌ Ошибка поиска: ${result.error}\n💡 ${result.suggestion}` : 
+                    `❌ Ошибка поиска: ${result.error}`;
+                actionsExecuted.push(errorMsg);
             }
         } catch (error) {
-            actionsExecuted.push(`❌ Ошибка поиска: ${error.message}`);
+            actionsExecuted.push(`❌ Ошибка поиска: ${error.message}\n💡 Попробуйте использовать <FETCH_URL> для прямого чтения сайтов`);
         }
     }
 
@@ -1249,18 +916,18 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 7. GITHUB_LIST - List GitHub files
+    // 7. GITHUB_LIST - List files in GitHub
     const githubListRegex = /<GITHUB_LIST>(.*?)<\/GITHUB_LIST>/g;
     while ((match = githubListRegex.exec(aiResponse)) !== null) {
-        const dirPath = match[1].trim() || '';
+        const dirPath = match[1].trim();
         try {
             const result = await githubStorage.listFiles(dirPath);
             if (result.success) {
-                let fileList = `📁 Файлы в ${dirPath || 'корневой папке'}:\n\n`;
+                let output = `📁 Файлы в "${dirPath || 'корне'}":\n\n`;
                 result.files.forEach(f => {
-                    fileList += `  ${f.type === 'dir' ? '📁' : '📄'} ${f.name}\n`;
+                    output += `${f.type === 'dir' ? '📁' : '📄'} ${f.name} (${f.size} bytes)\n`;
                 });
-                actionsExecuted.push(fileList);
+                actionsExecuted.push(output);
             } else {
                 actionsExecuted.push('❌ Ошибка: ' + result.error);
             }
@@ -1281,255 +948,50 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             const routeCode = codeMatch[1].trim();
             try {
                 await executeInSandbox(routeCode, chatId);
-                await registerWebsite(routePath, routeCode);
-                actionsExecuted.push(`🌐 Сайт запущен и сохранён на GitHub!\n🔗 http://localhost:${CONFIG.PORT}${routePath}`);
+                storage.websites.set(routePath, routeCode);
+                actionsExecuted.push(`🌐 Сайт запущен на: http://localhost:${CONFIG.PORT}${routePath}`);
             } catch (error) {
                 actionsExecuted.push('❌ Ошибка создания сайта: ' + error.message);
             }
         }
     }
 
-    // 9. DISABLE_WEBSITE - Disable website (can be re-enabled)
-    const disableWebsiteRegex = /<DISABLE_WEBSITE>(.*?)<\/DISABLE_WEBSITE>/g;
-    while ((match = disableWebsiteRegex.exec(aiResponse)) !== null) {
-        const routePath = match[1].trim();
-        try {
-            const result = await dataManager.disableWebsite(routePath);
-            if (result.success) {
-                // Remove from Express routes
-                if (app._router && app._router.stack) {
-                    app._router.stack = app._router.stack.filter(layer => {
-                        if (layer.route) {
-                            return layer.route.path !== routePath;
-                        }
-                        return true;
-                    });
-                }
-                actionsExecuted.push(`⏸️ Сайт ${routePath} выключен. Можно включить обратно.`);
-            } else {
-                actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка отключения сайта: ' + error.message);
-        }
-    }
-
-    // 10. ENABLE_WEBSITE - Enable website
-    const enableWebsiteRegex = /<ENABLE_WEBSITE>(.*?)<\/ENABLE_WEBSITE>/g;
-    while ((match = enableWebsiteRegex.exec(aiResponse)) !== null) {
-        const routePath = match[1].trim();
-        try {
-            const result = await dataManager.enableWebsite(routePath);
-            if (result.success) {
-                // Restore website to Express
-                const code = await dataManager.getWebsite(routePath);
-                if (code) {
-                    await restoreWebsite(routePath, code);
-                    actionsExecuted.push(`✅ Сайт ${routePath} включен обратно!\n🔗 http://localhost:${CONFIG.PORT}${routePath}`);
-                } else {
-                    actionsExecuted.push(`❌ Код сайта не найден`);
-                }
-            } else {
-                actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка включения сайта: ' + error.message);
-        }
-    }
-
-    // 11. DELETE_WEBSITE - Delete website permanently
-    const deleteWebsiteRegex = /<DELETE_WEBSITE>(.*?)<\/DELETE_WEBSITE>/g;
-    while ((match = deleteWebsiteRegex.exec(aiResponse)) !== null) {
-        const routePath = match[1].trim();
-        try {
-            const success = await deleteWebsite(routePath);
-            if (success) {
-                actionsExecuted.push(`✅ Сайт ${routePath} полностью удалён из GitHub`);
-            } else {
-                actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка удаления сайта: ' + error.message);
-        }
-    }
-
-    // 12. CREATE_BOT - Create new bot
-    const createBotRegex = /<CREATE_BOT>([\s\S]*?)<\/CREATE_BOT>/g;
-    while ((match = createBotRegex.exec(aiResponse)) !== null) {
+    // 9. SAVE_FILE - Save local file
+    const saveFileRegex = /<SAVE_FILE>([\s\S]*?)<\/SAVE_FILE>/g;
+    while ((match = saveFileRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
-        const nameMatch = content.match(/NAME:\s*([^\n]+)/);
-        const tokenMatch = content.match(/TOKEN:\s*([^\n]+)/);
-        const codeMatch = content.match(/CODE:\s*([\s\S]+)/);
+        const pathMatch = content.match(/PATH:\s*([^\n]+)/);
+        const contentMatch = content.match(/CONTENT:\s*([\s\S]+)/);
         
-        if (nameMatch && tokenMatch && codeMatch) {
-            const botName = nameMatch[1].trim();
-            const botToken = tokenMatch[1].trim();
-            const botCode = codeMatch[1].trim();
-            
+        if (pathMatch && contentMatch) {
+            const filePath = pathMatch[1].trim();
+            const fileContent = contentMatch[1].trim();
             try {
-                // Save bot to GitHub
-                const result = await dataManager.saveBot(botName, {
-                    token: botToken,
-                    code: botCode,
-                    enabled: true
-                });
-                
-                if (result.success) {
-                    // Start the bot
-                    await restoreBot(botName, botToken, botCode);
-                    actionsExecuted.push(`🎉 Бот "${botName}" создан и запущен!\n✅ Сохранён на GitHub\n🔥 При перезапуске автоматически загрузится!`);
-                } else {
-                    actionsExecuted.push('❌ Ошибка сохранения бота: ' + result.error);
+                const dir = path.dirname(filePath);
+                if (dir !== '.') {
+                    await fs.mkdir(dir, { recursive: true });
                 }
+                await fs.writeFile(filePath, fileContent, 'utf-8');
+                actionsExecuted.push(`✅ Файл сохранён: ${filePath}`);
             } catch (error) {
-                actionsExecuted.push('❌ Ошибка создания бота: ' + error.message);
+                actionsExecuted.push('❌ Ошибка сохранения: ' + error.message);
             }
-        } else {
-            actionsExecuted.push('❌ Неверный формат CREATE_BOT. Нужны: NAME, TOKEN, CODE');
         }
     }
 
-    // 13. DISABLE_BOT - Disable bot
-    const disableBotRegex = /<DISABLE_BOT>(.*?)<\/DISABLE_BOT>/g;
-    while ((match = disableBotRegex.exec(aiResponse)) !== null) {
-        const botName = match[1].trim();
+    // 10. READ_FILE - Read local file
+    const readFileRegex = /<READ_FILE>(.*?)<\/READ_FILE>/g;
+    while ((match = readFileRegex.exec(aiResponse)) !== null) {
+        const filePath = match[1].trim();
         try {
-            await stopBot(botName);
-            const result = await dataManager.disableBot(botName);
-            if (result.success) {
-                actionsExecuted.push(`⏸️ Бот ${botName} выключен. Можно включить обратно.`);
-            } else {
-                actionsExecuted.push(`❌ Бот ${botName} не найден`);
-            }
+            const content = await fs.readFile(filePath, 'utf-8');
+            actionsExecuted.push(`📄 Содержимое ${filePath}:\n\n${content}`);
         } catch (error) {
-            actionsExecuted.push('❌ Ошибка отключения бота: ' + error.message);
+            actionsExecuted.push('❌ Ошибка чтения: ' + error.message);
         }
     }
 
-    // 14. ENABLE_BOT - Enable bot
-    const enableBotRegex = /<ENABLE_BOT>(.*?)<\/ENABLE_BOT>/g;
-    while ((match = enableBotRegex.exec(aiResponse)) !== null) {
-        const botName = match[1].trim();
-        try {
-            const result = await dataManager.enableBot(botName);
-            if (result.success) {
-                const botData = await dataManager.getBot(botName);
-                if (botData) {
-                    await restoreBot(botName, botData.token, botData.code);
-                    actionsExecuted.push(`✅ Бот ${botName} включен обратно!`);
-                } else {
-                    actionsExecuted.push(`❌ Данные бота не найдены`);
-                }
-            } else {
-                actionsExecuted.push(`❌ Бот ${botName} не найден`);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка включения бота: ' + error.message);
-        }
-    }
-
-    // 15. DELETE_BOT - Delete bot permanently
-    const deleteBotRegex = /<DELETE_BOT>(.*?)<\/DELETE_BOT>/g;
-    while ((match = deleteBotRegex.exec(aiResponse)) !== null) {
-        const botName = match[1].trim();
-        try {
-            const success = await deleteBot(botName);
-            if (success) {
-                actionsExecuted.push(`✅ Бот ${botName} полностью удалён из GitHub`);
-            } else {
-                actionsExecuted.push(`❌ Бот ${botName} не найден`);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка удаления бота: ' + error.message);
-        }
-    }
-
-    // 16. LIST_BOTS - List all bots
-    if (aiResponse.includes('<LIST_BOTS>')) {
-        try {
-            const botsData = await dataManager.getAllBots();
-            const bots = Object.keys(botsData);
-            
-            if (bots.length === 0) {
-                actionsExecuted.push('🤖 Нет ботов (проверено на GitHub)');
-            } else {
-                let botList = '🤖 Боты (загружено с GitHub):\n\n';
-                for (const botName of bots) {
-                    const botData = botsData[botName];
-                    const enabled = botData.enabled !== false;
-                    const status = enabled ? '✅ Включен' : '⏸️ Выключен';
-                    const running = cache.runningBots.has(botName) ? '🟢 Работает' : '🔴 Остановлен';
-                    botList += `  ${status} ${running}: ${botName}\n`;
-                }
-                actionsExecuted.push(botList);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка загрузки списка: ' + error.message);
-        }
-    }
-
-    // 17. LIST_WEBSITES - List all running websites
-    if (aiResponse.includes('<LIST_WEBSITES>')) {
-        try {
-            const websitesData = await dataManager.getAllWebsites();
-            const websites = Object.keys(websitesData);
-            
-            if (websites.length === 0) {
-                actionsExecuted.push('🌐 Нет сайтов (проверено на GitHub)');
-            } else {
-                let siteList = '🌐 Сайты (загружено с GitHub):\n\n';
-                for (const path of websites) {
-                    const websiteData = websitesData[path];
-                    let enabled = true;
-                    if (typeof websiteData === 'object') {
-                        enabled = websiteData.enabled !== false;
-                    }
-                    const status = enabled ? '✅ Включен' : '⏸️ Выключен';
-                    siteList += `  ${status}: http://localhost:${CONFIG.PORT}${path}\n`;
-                }
-                actionsExecuted.push(siteList);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка загрузки списка: ' + error.message);
-        }
-    }
-
-    // 11. EXPORT_ALL - Export all bot data
-    if (aiResponse.includes('<EXPORT_ALL>')) {
-        try {
-            let exportContent = '# Complete Bot Data Export\n\n';
-            exportContent += `Export Date: ${new Date().toISOString()}\n\n`;
-            
-            const commandsData = await dataManager.getAllCommands();
-            exportContent += '## Commands\n\n';
-            for (const [name, handler] of Object.entries(commandsData)) {
-                exportContent += `### /${name}\n\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
-            }
-            
-            const websitesData = await dataManager.getAllWebsites();
-            exportContent += '## Websites\n\n';
-            for (const [path, code] of Object.entries(websitesData)) {
-                exportContent += `### ${path}\n\nURL: http://localhost:${CONFIG.PORT}${path}\n\n\`\`\`javascript\n${code}\n\`\`\`\n\n`;
-            }
-            
-            const databasesData = await dataManager.getAllDatabases();
-            exportContent += '## Databases\n\n';
-            for (const [dbName, db] of Object.entries(databasesData)) {
-                exportContent += `### ${dbName}\n\n\`\`\`json\n${JSON.stringify(db, null, 2)}\n\`\`\`\n\n`;
-            }
-            
-            await githubStorage.saveFile(
-                `exports/complete-export-${Date.now()}.md`,
-                exportContent,
-                'Complete bot data export'
-            );
-            actionsExecuted.push('✅ Все данные экспортированы на GitHub');
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка экспорта: ' + error.message);
-        }
-    }
-
-    // 12. NPM_INSTALL - Install npm package
+    // 11. NPM_INSTALL - Install npm package
     const npmInstallRegex = /<NPM_INSTALL>(.*?)<\/NPM_INSTALL>/g;
     while ((match = npmInstallRegex.exec(aiResponse)) !== null) {
         const packageName = match[1].trim();
@@ -1541,55 +1003,127 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 13. DELETE_COMMAND - Delete command
+    // 12. DELETE_COMMAND - Delete command
     const deleteCommandRegex = /<DELETE_COMMAND>(.*?)<\/DELETE_COMMAND>/g;
     while ((match = deleteCommandRegex.exec(aiResponse)) !== null) {
         const cmdName = match[1].trim();
-        if (await deleteCommand(cmdName)) {
-            actionsExecuted.push(`✅ Команда /${cmdName} удалена из GitHub`);
+        if (deleteCommand(cmdName)) {
+            actionsExecuted.push(`✅ Команда /${cmdName} удалена`);
         } else {
             actionsExecuted.push(`❌ Команда /${cmdName} не найдена`);
         }
     }
 
-    // 14. LIST_COMMANDS - List commands
+    // 13. LIST_COMMANDS - List commands
     if (aiResponse.includes('<LIST_COMMANDS>')) {
-        try {
-            const commandsData = await dataManager.getAllCommands();
-            const commands = Object.keys(commandsData);
-            
-            if (commands.length === 0) {
-                actionsExecuted.push('📝 Нет зарегистрированных команд (проверено на GitHub)');
-            } else {
-                let cmdList = '🤖 Доступные команды (загружено с GitHub):\n\n';
-                commands.forEach(name => {
-                    cmdList += `  /${name}\n`;
-                });
-                actionsExecuted.push(cmdList);
+        if (storage.customCommands.size === 0) {
+            actionsExecuted.push('📝 Нет зарегистрированных команд');
+        } else {
+            let cmdList = '🤖 Доступные команды:\n\n';
+            for (const [cmdName] of storage.customCommands) {
+                cmdList += `  /${cmdName}\n`;
             }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка загрузки списка: ' + error.message);
+            actionsExecuted.push(cmdList);
         }
     }
 
-    // 15. CREATE_DB - Create database
+    // 14. ACTIVATE_BOT - Create child bot
+    const activateBotRegex = /<ACTIVATE_BOT>([\s\S]*?)<\/ACTIVATE_BOT>/g;
+    while ((match = activateBotRegex.exec(aiResponse)) !== null) {
+        const content = match[1].trim();
+        const tokenMatch = content.match(/TOKEN:\s*([^\n]+)/);
+        const codeMatch = content.match(/CODE:\s*([\s\S]+)/);
+        
+        if (tokenMatch && codeMatch) {
+            const token = tokenMatch[1].trim();
+            const code = codeMatch[1].trim();
+            
+            try {
+                // Stop any existing bot with same token
+                for (const [id, entry] of storage.runningBots) {
+                    if (entry.token === token) {
+                        try {
+                            entry.bot.stopPolling && entry.bot.stopPolling();
+                            storage.runningBots.delete(id);
+                        } catch (e) {}
+                    }
+                }
+
+                const newBot = new TelegramBot(token, {
+                    polling: { interval: 500, params: { timeout: 10 } }
+                });
+                
+                const botId = `bot_${Date.now()}`;
+                storage.runningBots.set(botId, { bot: newBot, token, code });
+                
+                // Execute bot code
+                const sandbox = {
+                    bot: newBot,
+                    console,
+                    require,
+                    axios,
+                    TelegramBot
+                };
+                const context = vm.createContext(sandbox);
+                const script = new vm.Script(code);
+                script.runInContext(context);
+                
+                actionsExecuted.push(`✅ Бот ${botId} запущен успешно`);
+            } catch (error) {
+                actionsExecuted.push('❌ Ошибка запуска бота: ' + error.message);
+            }
+        }
+    }
+
+    // 15. STOP_BOT - Stop child bot
+    const stopBotRegex = /<STOP_BOT>(.*?)<\/STOP_BOT>/g;
+    while ((match = stopBotRegex.exec(aiResponse)) !== null) {
+        const token = match[1].trim();
+        let stopped = false;
+        for (const [id, entry] of storage.runningBots) {
+            if (entry.token === token) {
+                try {
+                    entry.bot.stopPolling && entry.bot.stopPolling();
+                    storage.runningBots.delete(id);
+                    actionsExecuted.push(`✅ Бот ${id} остановлен`);
+                    stopped = true;
+                } catch (error) {
+                    actionsExecuted.push(`❌ Ошибка остановки ${id}: ` + error.message);
+                }
+            }
+        }
+        if (!stopped) {
+            actionsExecuted.push('❌ Бот с указанным токеном не найден');
+        }
+    }
+
+    // 16. LIST_BOTS - List running bots
+    if (aiResponse.includes('<LIST_BOTS>')) {
+        if (storage.runningBots.size === 0) {
+            actionsExecuted.push('📝 Нет запущенных дочерних ботов');
+        } else {
+            let botsList = '🤖 Запущенные боты:\n\n';
+            for (const [botId, botData] of storage.runningBots) {
+                const tokenPreview = botData.token.substring(0, 10) + '...';
+                botsList += `  • ${botId} (токен: ${tokenPreview})\n`;
+            }
+            actionsExecuted.push(botsList);
+        }
+    }
+
+    // 17. CREATE_DB - Create database
     const createDbRegex = /<CREATE_DB>(.*?)<\/CREATE_DB>/g;
     while ((match = createDbRegex.exec(aiResponse)) !== null) {
         const dbName = match[1].trim();
-        try {
-            const existing = await dataManager.getDatabase(dbName);
-            if (!existing) {
-                await dataManager.saveDatabase(dbName, {});
-                actionsExecuted.push(`✅ База данных "${dbName}" создана на GitHub`);
-            } else {
-                actionsExecuted.push(`⚠️ База данных "${dbName}" уже существует на GitHub`);
-            }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка создания БД: ' + error.message);
+        if (!storage.databases.has(dbName)) {
+            storage.databases.set(dbName, new Map());
+            actionsExecuted.push(`✅ База данных "${dbName}" создана`);
+        } else {
+            actionsExecuted.push(`⚠️ База данных "${dbName}" уже существует`);
         }
     }
 
-    // 16. DB_SET - Set value in database
+    // 18. DB_SET - Set value in database
     const dbSetRegex = /<DB_SET>([\s\S]*?)<\/DB_SET>/g;
     while ((match = dbSetRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
@@ -1602,16 +1136,16 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             const key = keyMatch[1].trim();
             const value = valueMatch[1].trim();
             
-            try {
-                await dataManager.setDatabaseValue(dbName, key, value);
-                actionsExecuted.push(`✅ Сохранено в БД "${dbName}" на GitHub: ${key}`);
-            } catch (error) {
-                actionsExecuted.push('❌ Ошибка сохранения: ' + error.message);
+            if (!storage.databases.has(dbName)) {
+                storage.databases.set(dbName, new Map());
             }
+            
+            storage.databases.get(dbName).set(key, value);
+            actionsExecuted.push(`✅ Сохранено в БД "${dbName}": ${key}`);
         }
     }
 
-    // 17. DB_GET - Get value from database
+    // 19. DB_GET - Get value from database
     const dbGetRegex = /<DB_GET>([\s\S]*?)<\/DB_GET>/g;
     while ((match = dbGetRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
@@ -1622,15 +1156,15 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             const dbName = dbMatch[1].trim();
             const key = keyMatch[1].trim();
             
-            try {
-                const value = await dataManager.getDatabaseValue(dbName, key);
-                if (value !== null) {
-                    actionsExecuted.push(`📊 Значение из GitHub БД "${dbName}[${key}]": ${value}`);
+            if (storage.databases.has(dbName)) {
+                const db = storage.databases.get(dbName);
+                if (db.has(key)) {
+                    actionsExecuted.push(`📊 Значение из "${dbName}[${key}]": ${db.get(key)}`);
                 } else {
-                    actionsExecuted.push(`❌ Ключ "${key}" не найден в БД "${dbName}" на GitHub`);
+                    actionsExecuted.push(`❌ Ключ "${key}" не найден в БД "${dbName}"`);
                 }
-            } catch (error) {
-                actionsExecuted.push('❌ Ошибка загрузки: ' + error.message);
+            } else {
+                actionsExecuted.push(`❌ База данных "${dbName}" не существует`);
             }
         }
     }
@@ -1681,23 +1215,7 @@ function splitMessage(text, maxLength = 4000) {
 }
 
 async function sendLongMessage(chatId, text) {
-    let message = text;
-    if (typeof message !== 'string') {
-        if (message === null || message === undefined) {
-            return;
-        }
-        if (typeof message === 'object') {
-            try {
-                message = JSON.stringify(message, null, 2);
-            } catch (e) {
-                message = String(message);
-            }
-        } else {
-            message = String(message);
-        }
-    }
-    
-    const chunks = splitMessage(message);
+    const chunks = splitMessage(text);
     for (let i = 0; i < chunks.length; i++) {
         try {
             await bot.sendMessage(chatId, chunks[i]);
@@ -1719,6 +1237,7 @@ bot.on('message', async (msg) => {
     const userId = msg.from.id;
     const text = msg.text;
     
+    // Ignore messages without text
     if (!text) return;
     
     console.log(`[Message] User ${userId}: ${text.substring(0, 50)}...`);
@@ -1727,25 +1246,14 @@ bot.on('message', async (msg) => {
     if (text.startsWith('/')) {
         const [command, ...args] = text.slice(1).split(' ');
         
-        if (commandsMemory.has(command)) {
+        if (storage.customCommands.has(command)) {
             try {
-                const handler = commandsMemory.get(command);
+                const handler = storage.customCommands.get(command);
                 const result = await handler(chatId, args.join(' '));
-                if (result !== undefined && result !== null) {
-                    let message = result;
-                    if (typeof message === 'object') {
-                        try {
-                            message = JSON.stringify(message, null, 2);
-                        } catch (e) {
-                            message = String(message);
-                        }
-                    } else {
-                        message = String(message);
-                    }
-                    await sendLongMessage(chatId, message);
+                if (result) {
+                    await sendLongMessage(chatId, String(result));
                 }
             } catch (error) {
-                console.error('[Command Error]', error);
                 await bot.sendMessage(chatId, '❌ Ошибка выполнения команды: ' + error.message);
             }
             return;
@@ -1755,18 +1263,17 @@ bot.on('message', async (msg) => {
         if (command === 'start') {
             await bot.sendMessage(chatId, 
                 '🚀 *SHERLOCK - ULTRA AI BOT*\n\n' +
-                '✨ Я мощнейший AI с GitHub хранилищем!\n\n' +
+                '✨ Я мощнейший AI с расширенными возможностями!\n\n' +
                 '🔥 Мои способности:\n' +
                 '• 🔍 Поиск в интернете\n' +
                 '• 🌐 Чтение веб-страниц\n' +
                 '• 💻 Программирование\n' +
                 '• 🚀 Хостинг сайтов\n' +
-                '• ☁️ GitHub хранилище (ВСЕ данные)\n' +
-                '• 🗄️ Базы данных (на GitHub)\n' +
+                '• ☁️ GitHub хранилище\n' +
+                '• 🗄️ Базы данных\n' +
                 '• 🤖 Создание ботов\n' +
-                '• 📦 NPM пакеты\n\n' +
-                '💾 ВСЕ твои команды, сайты и БД хранятся на GitHub!\n' +
-                'При перезапуске всё загружается автоматически!\n\n' +
+                '• 📦 NPM пакеты\n' +
+                '• ...и многое другое!\n\n' +
                 'Просто напиши что нужно сделать! 💪',
                 { parse_mode: 'Markdown' }
             );
@@ -1783,36 +1290,17 @@ bot.on('message', async (msg) => {
                 '• "сохрани эти данные в GitHub"\n' +
                 '• "создай базу данных users"\n' +
                 '• "установи пакет moment"\n\n' +
-                '💾 Всё автоматически сохраняется на GitHub!\n' +
                 'Я понимаю естественный язык! 🧠'
             );
-            return;
-        }
-
-        if (command === 'status') {
-            try {
-                const commandsData = await dataManager.getAllCommands();
-                const websitesData = await dataManager.getAllWebsites();
-                const databasesData = await dataManager.getAllDatabases();
-                
-                const status = `📊 *Статус бота (данные с GitHub)*\n\n` +
-                    `📝 Команд: ${Object.keys(commandsData).length}\n` +
-                    `🌐 Сайтов: ${Object.keys(websitesData).length}\n` +
-                    `🗄️ Баз данных: ${Object.keys(databasesData).length}\n` +
-                    `💬 Диалогов в памяти: ${cache.conversations.size}\n\n` +
-                    `✅ Все данные на GitHub!`;
-                
-                await bot.sendMessage(chatId, status, { parse_mode: 'Markdown' });
-            } catch (error) {
-                await bot.sendMessage(chatId, '❌ Ошибка получения статуса: ' + error.message);
-            }
             return;
         }
     }
     
     try {
+        // Get conversation history
         const history = getConversationHistory(userId);
         
+        // Add image analysis if photo present
         let userMessage = text;
         if (msg.photo && msg.photo.length > 0) {
             userMessage += '\n[Пользователь отправил изображение - проанализируй его детально]';
@@ -1820,12 +1308,16 @@ bot.on('message', async (msg) => {
         
         addToHistory(userId, 'user', userMessage);
         
+        // Send typing indicator
         await bot.sendChatAction(chatId, 'typing');
         
+        // Get AI response
         const aiResponse = await callOpenRouter(history);
         
+        // Parse and execute actions
         const actionsExecuted = await parseAndExecuteActions(aiResponse, chatId, userId);
         
+        // Remove action tags from response
         let cleanResponse = aiResponse;
         cleanResponse = cleanResponse.replace(/<CODE_ACTION>[\s\S]*?<\/CODE_ACTION>/g, '');
         cleanResponse = cleanResponse.replace(/<EXECUTE_NOW>[\s\S]*?<\/EXECUTE_NOW>/g, '');
@@ -1835,89 +1327,125 @@ bot.on('message', async (msg) => {
         cleanResponse = cleanResponse.replace(/<GITHUB_LOAD>.*?<\/GITHUB_LOAD>/g, '');
         cleanResponse = cleanResponse.replace(/<GITHUB_LIST>.*?<\/GITHUB_LIST>/g, '');
         cleanResponse = cleanResponse.replace(/<HOST_WEBSITE>[\s\S]*?<\/HOST_WEBSITE>/g, '');
-        cleanResponse = cleanResponse.replace(/<STOP_WEBSITE>.*?<\/STOP_WEBSITE>/g, '');
-        cleanResponse = cleanResponse.replace(/<DISABLE_WEBSITE>.*?<\/DISABLE_WEBSITE>/g, '');
-        cleanResponse = cleanResponse.replace(/<ENABLE_WEBSITE>.*?<\/ENABLE_WEBSITE>/g, '');
-        cleanResponse = cleanResponse.replace(/<DELETE_WEBSITE>.*?<\/DELETE_WEBSITE>/g, '');
-        cleanResponse = cleanResponse.replace(/<LIST_WEBSITES>/g, '');
-        cleanResponse = cleanResponse.replace(/<CREATE_BOT>[\s\S]*?<\/CREATE_BOT>/g, '');
-        cleanResponse = cleanResponse.replace(/<DISABLE_BOT>.*?<\/DISABLE_BOT>/g, '');
-        cleanResponse = cleanResponse.replace(/<ENABLE_BOT>.*?<\/ENABLE_BOT>/g, '');
-        cleanResponse = cleanResponse.replace(/<DELETE_BOT>.*?<\/DELETE_BOT>/g, '');
-        cleanResponse = cleanResponse.replace(/<LIST_BOTS>/g, '');
-        cleanResponse = cleanResponse.replace(/<EXPORT_ALL>/g, '');
+        cleanResponse = cleanResponse.replace(/<SAVE_FILE>[\s\S]*?<\/SAVE_FILE>/g, '');
+        cleanResponse = cleanResponse.replace(/<READ_FILE>.*?<\/READ_FILE>/g, '');
         cleanResponse = cleanResponse.replace(/<NPM_INSTALL>.*?<\/NPM_INSTALL>/g, '');
         cleanResponse = cleanResponse.replace(/<DELETE_COMMAND>.*?<\/DELETE_COMMAND>/g, '');
         cleanResponse = cleanResponse.replace(/<LIST_COMMANDS>/g, '');
+        cleanResponse = cleanResponse.replace(/<ACTIVATE_BOT>[\s\S]*?<\/ACTIVATE_BOT>/g, '');
+        cleanResponse = cleanResponse.replace(/<STOP_BOT>.*?<\/STOP_BOT>/g, '');
+        cleanResponse = cleanResponse.replace(/<LIST_BOTS>/g, '');
         cleanResponse = cleanResponse.replace(/<CREATE_DB>.*?<\/CREATE_DB>/g, '');
         cleanResponse = cleanResponse.replace(/<DB_SET>[\s\S]*?<\/DB_SET>/g, '');
         cleanResponse = cleanResponse.replace(/<DB_GET>[\s\S]*?<\/DB_GET>/g, '');
         cleanResponse = cleanResponse.trim();
         
-        addToHistory(userId, 'assistant', aiResponse);
+        // Combine response with action results
+        let finalResponse = '';
         
         if (cleanResponse) {
-            await sendLongMessage(chatId, cleanResponse);
+            finalResponse += cleanResponse;
         }
         
         if (actionsExecuted.length > 0) {
-            for (const action of actionsExecuted) {
-                await sendLongMessage(chatId, action);
-            }
+            if (finalResponse) finalResponse += '\n\n';
+            finalResponse += actionsExecuted.join('\n\n');
+        }
+        
+        if (finalResponse) {
+            await sendLongMessage(chatId, finalResponse);
+            addToHistory(userId, 'assistant', aiResponse);
         }
         
     } catch (error) {
-        console.error('[Message Error]', error);
-        await bot.sendMessage(chatId, '❌ Ошибка: ' + error.message);
+        console.error('[Error]', error.message);
+        await bot.sendMessage(chatId, '❌ Произошла ошибка: ' + error.message);
     }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 🚀 STARTUP & EXPRESS SERVER
+// 🌐 EXPRESS SERVER
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function startup() {
-    try {
-        console.log('🔄 Initializing bot with GitHub storage...');
-        
-        // Initialize GitHub storage structure
-        await dataManager.initializeStorage();
-        
-        // Load all data from GitHub
-        await dataManager.loadAllDataToMemory();
-        
-        // Start Express server
-        app.listen(CONFIG.PORT, () => {
-            console.log(`✅ Express server running on port ${CONFIG.PORT}`);
-            console.log(`🌐 Hosted websites available at http://localhost:${CONFIG.PORT}`);
+app.get('/', (req, res) => {
+    res.send(`
+        <html>
+        <head>
+            <title>Ultra AI Bot</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    max-width: 800px;
+                    margin: 50px auto;
+                    padding: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                }
+                h1 { text-align: center; }
+                .info { background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; margin: 20px 0; }
+                .feature { margin: 10px 0; }
+            </style>
+        </head>
+        <body>
+            <h1>🚀 Ultra-Powered AI Bot</h1>
+            <div class="info">
+                <h2>✨ Status: Online</h2>
+                <div class="feature">🤖 Commands: ${storage.customCommands.size}</div>
+                <div class="feature">🔧 Running Bots: ${storage.runningBots.size}</div>
+                <div class="feature">🗄️ Databases: ${storage.databases.size}</div>
+                <div class="feature">🌐 Hosted Sites: ${storage.websites.size}</div>
+            </div>
+            <div class="info">
+                <h2>🔥 Capabilities:</h2>
+                <div class="feature">✅ Internet Search</div>
+                <div class="feature">✅ Web Scraping</div>
+                <div class="feature">✅ GitHub Storage</div>
+                <div class="feature">✅ Web Hosting</div>
+                <div class="feature">✅ Database Management</div>
+                <div class="feature">✅ Bot Creation</div>
+                <div class="feature">✅ Code Execution</div>
+                <div class="feature">✅ NPM Packages</div>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
+let server;
+function startServer(port = CONFIG.PORT) {
+    if (server) return;
+    
+    server = app.listen(port)
+        .on('listening', () => {
+            console.log(`✅ Express server running on port ${port}`);
+        })
+        .on('error', (err) => {
+            if (err.code === 'EADDRINUSE') {
+                console.log(`Port ${port} busy, trying ${port + 1}...`);
+                startServer(port + 1);
+            } else {
+                console.error('Server error:', err);
+            }
         });
-        
-        console.log('');
-        console.log('═══════════════════════════════════════════════════════════');
-        console.log('🎉 BOT IS READY WITH GITHUB STORAGE!');
-        console.log('💾 All data (commands/websites/databases) stored on GitHub');
-        console.log('🔄 Data auto-syncs on every change');
-        console.log('═══════════════════════════════════════════════════════════');
-        console.log('');
-        
-    } catch (error) {
-        console.error('❌ Startup error:', error);
-        process.exit(1);
-    }
 }
 
-// Handle graceful shutdown
-process.on('SIGINT', async () => {
-    console.log('\n🛑 Shutting down bot...');
-    console.log('💾 All data already saved on GitHub!');
-    process.exit(0);
+startServer();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🛡️ ERROR HANDLING
+// ═══════════════════════════════════════════════════════════════════════════
+
+bot.on('polling_error', (error) => {
+    console.error('[Polling Error]', error.code, error.message);
 });
 
-process.on('SIGTERM', async () => {
-    console.log('\n🛑 Shutting down bot...');
-    console.log('💾 All data already saved on GitHub!');
-    process.exit(0);
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Unhandled Rejection]', reason);
 });
 
-// Start the bot
-startup();
+process.on('uncaughtException', (error) => {
+    console.error('[Uncaught Exception]', error);
+});
+
+console.log('🎉 Ultra AI Bot is fully operational!');
+console.log('💪 Ready to handle ANY task!');
