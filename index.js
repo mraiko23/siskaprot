@@ -740,26 +740,45 @@ async function callOpenRouter(messages) {
    KEY: mykey
    </DB_GET>
 
-6. ☁️ GITHUB ОПЕРАЦИИ
+6. 🤖 СОЗДАНИЕ БОТОВ (автосохранение на GitHub!)
+   <CREATE_BOT>
+   NAME: mybotname
+   TOKEN: 123456:ABCdef...
+   CODE: const myBot = new TelegramBot(botToken, {polling: true}); myBot.on('message', ...);
+   </CREATE_BOT>
+
+7. ☁️ GITHUB ОПЕРАЦИИ
    <GITHUB_SAVE>
    PATH: path/to/file.txt
    CONTENT: file content here
    </GITHUB_SAVE>
    <GITHUB_LOAD>path/to/file.txt</GITHUB_LOAD>
 
-7. 🛠️ УПРАВЛЕНИЕ
+8. 🛠️ УПРАВЛЕНИЕ
+   
+   КОМАНДЫ:
    <LIST_COMMANDS> - список команд
+   <DISABLE_COMMAND>cmdname</DISABLE_COMMAND> - ВЫКЛЮЧИТЬ команду (можно включить)
+   <ENABLE_COMMAND>cmdname</ENABLE_COMMAND> - ВКЛЮЧИТЬ команду обратно
    <DELETE_COMMAND>cmdname</DELETE_COMMAND> - УДАЛИТЬ команду (безвозвратно)
    
+   САЙТЫ:
    <LIST_WEBSITES> - список сайтов
    <DISABLE_WEBSITE>/path</DISABLE_WEBSITE> - ВЫКЛЮЧИТЬ сайт (можно включить)
    <ENABLE_WEBSITE>/path</ENABLE_WEBSITE> - ВКЛЮЧИТЬ сайт обратно
    <DELETE_WEBSITE>/path</DELETE_WEBSITE> - УДАЛИТЬ сайт (безвозвратно)
    
+   БОТЫ:
    <LIST_BOTS> - список ботов
    <DISABLE_BOT>botname</DISABLE_BOT> - ВЫКЛЮЧИТЬ бота (можно включить)
    <ENABLE_BOT>botname</ENABLE_BOT> - ВКЛЮЧИТЬ бота обратно
    <DELETE_BOT>botname</DELETE_BOT> - УДАЛИТЬ бота (безвозвратно)
+   
+   БАЗЫ ДАННЫХ:
+   <LIST_DATABASES> - список баз данных
+   <DISABLE_DATABASE>dbname</DISABLE_DATABASE> - ВЫКЛЮЧИТЬ БД (можно включить)
+   <ENABLE_DATABASE>dbname</ENABLE_DATABASE> - ВКЛЮЧИТЬ БД обратно
+   <DELETE_DATABASE>dbname</DELETE_DATABASE> - УДАЛИТЬ БД (безвозвратно)
    
    <EXPORT_ALL> - экспорт всех данных
 
@@ -779,14 +798,24 @@ async function callOpenRouter(messages) {
    Пользователь: "включи обратно бота mybot" → <ENABLE_BOT>mybot</ENABLE_BOT>
    Пользователь: "удали бота oldbot" → <DELETE_BOT>oldbot</DELETE_BOT>
 
+Примеры управления командами:
+   Пользователь: "выключи команду /calc" → <DISABLE_COMMAND>calc</DISABLE_COMMAND>
+   Пользователь: "включи команду /calc" → <ENABLE_COMMAND>calc</ENABLE_COMMAND>
+   Пользователь: "удали команду /old" → <DELETE_COMMAND>old</DELETE_COMMAND>
+
+Примеры управления базами данных:
+   Пользователь: "выключи базу users" → <DISABLE_DATABASE>users</DISABLE_DATABASE>
+   Пользователь: "включи базу users" → <ENABLE_DATABASE>users</ENABLE_DATABASE>
+   Пользователь: "удали базу olddb" → <DELETE_DATABASE>olddb</DELETE_DATABASE>
+
 🚫 НЕ СОЗДАВАЙ отдельные команды для включения/выключения - используй теги напрямую!
 
-8. 💻 ВЫПОЛНЕНИЕ КОДА
+9. 💻 ВЫПОЛНЕНИЕ КОДА
    <EXECUTE_NOW>
    // любой JS код
    </EXECUTE_NOW>
 
-9. 📦 NPM ПАКЕТЫ
+10. 📦 NPM ПАКЕТЫ
    <NPM_INSTALL>package-name</NPM_INSTALL>
 
 📝 Важные правила:
@@ -1324,7 +1353,43 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 12. DISABLE_BOT - Disable bot
+    // 12. CREATE_BOT - Create new bot
+    const createBotRegex = /<CREATE_BOT>([\s\S]*?)<\/CREATE_BOT>/g;
+    while ((match = createBotRegex.exec(aiResponse)) !== null) {
+        const content = match[1].trim();
+        const nameMatch = content.match(/NAME:\s*([^\n]+)/);
+        const tokenMatch = content.match(/TOKEN:\s*([^\n]+)/);
+        const codeMatch = content.match(/CODE:\s*([\s\S]+)/);
+        
+        if (nameMatch && tokenMatch && codeMatch) {
+            const botName = nameMatch[1].trim();
+            const botToken = tokenMatch[1].trim();
+            const botCode = codeMatch[1].trim();
+            
+            try {
+                // Save bot to GitHub
+                const result = await dataManager.saveBot(botName, {
+                    token: botToken,
+                    code: botCode,
+                    enabled: true
+                });
+                
+                if (result.success) {
+                    // Start the bot
+                    await restoreBot(botName, botToken, botCode);
+                    actionsExecuted.push(`🎉 Бот "${botName}" создан и запущен!\n✅ Сохранён на GitHub\n🔥 При перезапуске автоматически загрузится!`);
+                } else {
+                    actionsExecuted.push('❌ Ошибка сохранения бота: ' + result.error);
+                }
+            } catch (error) {
+                actionsExecuted.push('❌ Ошибка создания бота: ' + error.message);
+            }
+        } else {
+            actionsExecuted.push('❌ Неверный формат CREATE_BOT. Нужны: NAME, TOKEN, CODE');
+        }
+    }
+
+    // 13. DISABLE_BOT - Disable bot
     const disableBotRegex = /<DISABLE_BOT>(.*?)<\/DISABLE_BOT>/g;
     while ((match = disableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
@@ -1341,7 +1406,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 13. ENABLE_BOT - Enable bot
+    // 14. ENABLE_BOT - Enable bot
     const enableBotRegex = /<ENABLE_BOT>(.*?)<\/ENABLE_BOT>/g;
     while ((match = enableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
@@ -1363,7 +1428,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 14. DELETE_BOT - Delete bot permanently
+    // 15. DELETE_BOT - Delete bot permanently
     const deleteBotRegex = /<DELETE_BOT>(.*?)<\/DELETE_BOT>/g;
     while ((match = deleteBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
@@ -1379,7 +1444,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 15. LIST_BOTS - List all bots
+    // 16. LIST_BOTS - List all bots
     if (aiResponse.includes('<LIST_BOTS>')) {
         try {
             const botsData = await dataManager.getAllBots();
@@ -1403,7 +1468,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 16. LIST_WEBSITES - List all running websites
+    // 17. LIST_WEBSITES - List all running websites
     if (aiResponse.includes('<LIST_WEBSITES>')) {
         try {
             const websitesData = await dataManager.getAllWebsites();
@@ -1775,6 +1840,7 @@ bot.on('message', async (msg) => {
         cleanResponse = cleanResponse.replace(/<ENABLE_WEBSITE>.*?<\/ENABLE_WEBSITE>/g, '');
         cleanResponse = cleanResponse.replace(/<DELETE_WEBSITE>.*?<\/DELETE_WEBSITE>/g, '');
         cleanResponse = cleanResponse.replace(/<LIST_WEBSITES>/g, '');
+        cleanResponse = cleanResponse.replace(/<CREATE_BOT>[\s\S]*?<\/CREATE_BOT>/g, '');
         cleanResponse = cleanResponse.replace(/<DISABLE_BOT>.*?<\/DISABLE_BOT>/g, '');
         cleanResponse = cleanResponse.replace(/<ENABLE_BOT>.*?<\/ENABLE_BOT>/g, '');
         cleanResponse = cleanResponse.replace(/<DELETE_BOT>.*?<\/DELETE_BOT>/g, '');
