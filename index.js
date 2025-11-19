@@ -220,7 +220,8 @@ class GitHubDataManager {
     async saveCommand(commandName, handlerString) {
         console.log(`[DataManager] 💾 Saving command: ${commandName}`);
         const commandsData = await this.getAllCommands();
-        commandsData[commandName] = handlerString;
+        // Save in new format with enabled flag
+        commandsData[commandName] = { handler: handlerString, enabled: true };
         const result = await this.github.saveFile(
             'bot-data/commands.json', 
             JSON.stringify(commandsData, null, 2), 
@@ -243,7 +244,61 @@ class GitHubDataManager {
 
     async getCommand(commandName) {
         const commandsData = await this.getAllCommands();
-        return commandsData[commandName] || null;
+        const command = commandsData[commandName];
+        if (!command) return null;
+        // Handle both old format (string) and new format (object)
+        if (typeof command === 'string') {
+            return command; // Old format
+        }
+        return command.handler; // New format
+    }
+
+    async disableCommand(commandName) {
+        console.log(`[DataManager] 🔌 Disabling command: ${commandName}`);
+        const commandsData = await this.getAllCommands();
+        if (commandsData[commandName]) {
+            // Convert to new format if needed
+            if (typeof commandsData[commandName] === 'string') {
+                commandsData[commandName] = { handler: commandsData[commandName], enabled: false };
+            } else {
+                commandsData[commandName].enabled = false;
+            }
+            const result = await this.github.saveFile(
+                'bot-data/commands.json', 
+                JSON.stringify(commandsData, null, 2), 
+                `Disable command: ${commandName}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Command not found' };
+    }
+
+    async enableCommand(commandName) {
+        console.log(`[DataManager] ✅ Enabling command: ${commandName}`);
+        const commandsData = await this.getAllCommands();
+        if (commandsData[commandName]) {
+            // Convert to new format if needed
+            if (typeof commandsData[commandName] === 'string') {
+                commandsData[commandName] = { handler: commandsData[commandName], enabled: true };
+            } else {
+                commandsData[commandName].enabled = true;
+            }
+            const result = await this.github.saveFile(
+                'bot-data/commands.json', 
+                JSON.stringify(commandsData, null, 2), 
+                `Enable command: ${commandName}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Command not found' };
+    }
+
+    async isCommandEnabled(commandName) {
+        const commandsData = await this.getAllCommands();
+        const command = commandsData[commandName];
+        if (!command) return false;
+        if (typeof command === 'string') return true; // Old format, enabled by default
+        return command.enabled !== false; // New format
     }
 
     async getAllCommands() {
@@ -476,6 +531,85 @@ class GitHubDataManager {
         return bot.enabled !== false;
     }
 
+    // ========== SCRIPTS ==========
+    async saveScript(scriptName, scriptData) {
+        console.log(`[DataManager] 💾 Saving script: ${scriptName}`);
+        const scriptsData = await this.getAllScripts();
+        scriptsData[scriptName] = {
+            code: scriptData.code,
+            description: scriptData.description || '',
+            enabled: scriptData.enabled !== false
+        };
+        const result = await this.github.saveFile(
+            'bot-data/scripts.json', 
+            JSON.stringify(scriptsData, null, 2), 
+            `Add/update script: ${scriptName}`
+        );
+        return result;
+    }
+
+    async deleteScript(scriptName) {
+        console.log(`[DataManager] 🗑️ Deleting script: ${scriptName}`);
+        const scriptsData = await this.getAllScripts();
+        delete scriptsData[scriptName];
+        const result = await this.github.saveFile(
+            'bot-data/scripts.json', 
+            JSON.stringify(scriptsData, null, 2), 
+            `Delete script: ${scriptName}`
+        );
+        return result;
+    }
+
+    async getScript(scriptName) {
+        const scriptsData = await this.getAllScripts();
+        return scriptsData[scriptName] || null;
+    }
+
+    async getAllScripts() {
+        const result = await this.github.loadFile('bot-data/scripts.json');
+        if (result.success) {
+            return JSON.parse(result.content);
+        }
+        return {};
+    }
+
+    async disableScript(scriptName) {
+        console.log(`[DataManager] 🔌 Disabling script: ${scriptName}`);
+        const scriptsData = await this.getAllScripts();
+        if (scriptsData[scriptName]) {
+            scriptsData[scriptName].enabled = false;
+            const result = await this.github.saveFile(
+                'bot-data/scripts.json', 
+                JSON.stringify(scriptsData, null, 2), 
+                `Disable script: ${scriptName}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Script not found' };
+    }
+
+    async enableScript(scriptName) {
+        console.log(`[DataManager] ✅ Enabling script: ${scriptName}`);
+        const scriptsData = await this.getAllScripts();
+        if (scriptsData[scriptName]) {
+            scriptsData[scriptName].enabled = true;
+            const result = await this.github.saveFile(
+                'bot-data/scripts.json', 
+                JSON.stringify(scriptsData, null, 2), 
+                `Enable script: ${scriptName}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Script not found' };
+    }
+
+    async isScriptEnabled(scriptName) {
+        const scriptsData = await this.getAllScripts();
+        const script = scriptsData[scriptName];
+        if (!script) return false;
+        return script.enabled !== false;
+    }
+
     // ========== INITIALIZATION ==========
     async initializeStorage() {
         console.log('[DataManager] 📂 Initializing GitHub storage...');
@@ -485,7 +619,8 @@ class GitHubDataManager {
             { path: 'bot-data/commands.json', content: '{}' },
             { path: 'bot-data/websites.json', content: '{}' },
             { path: 'bot-data/databases.json', content: '{}' },
-            { path: 'bot-data/bots.json', content: '{}' }
+            { path: 'bot-data/bots.json', content: '{}' },
+            { path: 'bot-data/scripts.json', content: '{}' }
         ];
 
         for (const file of files) {
@@ -505,16 +640,32 @@ class GitHubDataManager {
         // Load and restore commands
         const commandsData = await this.getAllCommands();
         let commandCount = 0;
-        for (const [name, funcString] of Object.entries(commandsData)) {
+        let disabledCommandCount = 0;
+        for (const [name, commandData] of Object.entries(commandsData)) {
             try {
-                const func = eval(`(${funcString})`);
-                await registerCommandInMemory(name, func);
-                commandCount++;
+                // Handle both old format (string) and new format (object)
+                let funcString, enabled;
+                if (typeof commandData === 'string') {
+                    funcString = commandData;
+                    enabled = true; // Old format, enabled by default
+                } else {
+                    funcString = commandData.handler;
+                    enabled = commandData.enabled !== false;
+                }
+                
+                if (enabled) {
+                    const func = eval(`(${funcString})`);
+                    await registerCommandInMemory(name, func);
+                    commandCount++;
+                } else {
+                    console.log(`[DataManager] ⏸️ Skipping disabled command: /${name}`);
+                    disabledCommandCount++;
+                }
             } catch (e) {
                 console.error(`[DataManager] Failed to restore command ${name}:`, e.message);
             }
         }
-        console.log(`[DataManager] ✅ Loaded ${commandCount} commands`);
+        console.log(`[DataManager] ✅ Loaded ${commandCount} commands (${disabledCommandCount} disabled)`);
 
         // Load and restore websites
         const websitesData = await this.getAllWebsites();
@@ -744,8 +895,10 @@ async function callOpenRouter(messages) {
    <CREATE_BOT>
    NAME: mybotname
    TOKEN: 123456:ABCdef...
-   CODE: const myBot = new TelegramBot(botToken, {polling: true}); myBot.on('message', ...);
+   CODE: const myBot = new TelegramBot(botToken, {polling: true}); myBot.on('message', (msg) => { myBot.sendMessage(msg.chat.id, 'Response'); }); setBotInstance(myBot);
    </CREATE_BOT>
+   
+   ⚠️ ВАЖНО: В конце CODE ОБЯЗАТЕЛЬНО добавь setBotInstance(экземпляр_бота) чтобы бот можно было остановить!
 
 7. ☁️ GITHUB ОПЕРАЦИИ
    <GITHUB_SAVE>
@@ -780,6 +933,12 @@ async function callOpenRouter(messages) {
    <ENABLE_DATABASE>dbname</ENABLE_DATABASE> - ВКЛЮЧИТЬ БД обратно
    <DELETE_DATABASE>dbname</DELETE_DATABASE> - УДАЛИТЬ БД (безвозвратно)
    
+   СКРИПТЫ:
+   <LIST_SCRIPTS> - список скриптов
+   <DISABLE_SCRIPT>scriptname</DISABLE_SCRIPT> - ВЫКЛЮЧИТЬ скрипт (можно включить)
+   <ENABLE_SCRIPT>scriptname</ENABLE_SCRIPT> - ВКЛЮЧИТЬ скрипт обратно
+   <DELETE_SCRIPT>scriptname</DELETE_SCRIPT> - УДАЛИТЬ скрипт (безвозвратно)
+   
    <EXPORT_ALL> - экспорт всех данных
 
 ⚠️ ВАЖНО: Различай действия!
@@ -808,12 +967,30 @@ async function callOpenRouter(messages) {
    Пользователь: "включи базу users" → <ENABLE_DATABASE>users</ENABLE_DATABASE>
    Пользователь: "удали базу olddb" → <DELETE_DATABASE>olddb</DELETE_DATABASE>
 
+Примеры работы со скриптами:
+   Пользователь: "сохрани этот код как hello" → <SAVE_SCRIPT> NAME: hello, CODE: ...
+   Пользователь: "запусти скрипт hello" → <RUN_SCRIPT>hello</RUN_SCRIPT>
+   Пользователь: "выключи скрипт hello" → <DISABLE_SCRIPT>hello</DISABLE_SCRIPT>
+   Пользователь: "запусти обратно hello" → <ENABLE_SCRIPT>hello</ENABLE_SCRIPT> + <RUN_SCRIPT>hello</RUN_SCRIPT>
+
 🚫 НЕ СОЗДАВАЙ отдельные команды для включения/выключения - используй теги напрямую!
 
 9. 💻 ВЫПОЛНЕНИЕ КОДА
+   
+   ОДНОРАЗОВОЕ выполнение:
    <EXECUTE_NOW>
-   // любой JS код
+   // любой JS код - выполнится один раз и НЕ сохранится
    </EXECUTE_NOW>
+   
+   СОХРАНИТЬ скрипт для повторного использования:
+   <SAVE_SCRIPT>
+   NAME: scriptname
+   DESCRIPTION: Описание что делает
+   CODE: console.log('Hello');
+   </SAVE_SCRIPT>
+   
+   ЗАПУСТИТЬ сохраненный скрипт:
+   <RUN_SCRIPT>scriptname</RUN_SCRIPT>
 
 10. 📦 NPM ПАКЕТЫ
    <NPM_INSTALL>package-name</NPM_INSTALL>
@@ -991,18 +1168,47 @@ async function restoreBot(botName, token, code) {
             return false;
         }
         
-        // Execute bot code
+        // Stop existing bot if running
+        if (cache.runningBots.has(botName)) {
+            await stopBot(botName);
+        }
+        
+        // Create special sandbox for bot with access to store itself
+        const botStorage = { instance: null };
         const sandbox = createSandbox(null);
         sandbox.botToken = token;
         sandbox.botName = botName;
-        const context = vm.createContext(sandbox);
-        const script = new vm.Script(code);
-        const botInstance = script.runInContext(context);
+        sandbox.setBotInstance = (bot) => {
+            botStorage.instance = bot;
+            cache.runningBots.set(botName, bot);
+        };
         
-        // Store bot instance
-        cache.runningBots.set(botName, botInstance);
-        console.log(`[Bot] Restored: ${botName}`);
-        return true;
+        // Execute bot code
+        const context = vm.createContext(sandbox);
+        // Wrap code to automatically store bot instance
+        const wrappedCode = `
+            (function() {
+                ${code}
+                // Try to find bot instance in scope
+                const possibleBots = Object.keys(this).filter(k => 
+                    this[k] && typeof this[k] === 'object' && this[k].stopPolling
+                );
+                if (possibleBots.length > 0) {
+                    setBotInstance(this[possibleBots[0]]);
+                }
+            }).call(this);
+        `;
+        const script = new vm.Script(wrappedCode);
+        script.runInContext(context);
+        
+        // Verify bot was stored
+        if (cache.runningBots.has(botName)) {
+            console.log(`[Bot] Restored and running: ${botName}`);
+            return true;
+        } else {
+            console.warn(`[Bot] Started but instance not captured: ${botName}`);
+            return true;
+        }
     } catch (error) {
         console.error(`[Bot] Failed to restore ${botName}:`, error.message);
         return false;
@@ -1013,17 +1219,55 @@ async function stopBot(botName) {
     try {
         if (cache.runningBots.has(botName)) {
             const botInstance = cache.runningBots.get(botName);
-            // Try to stop polling if it's a Telegram bot
-            if (botInstance && botInstance.stopPolling) {
-                await botInstance.stopPolling();
+            
+            // Try multiple methods to stop the bot
+            let stopped = false;
+            
+            // Method 1: stopPolling (Telegram bots)
+            if (botInstance && typeof botInstance.stopPolling === 'function') {
+                try {
+                    await botInstance.stopPolling();
+                    stopped = true;
+                    console.log(`[Bot] Stopped polling for: ${botName}`);
+                } catch (e) {
+                    console.warn(`[Bot] stopPolling failed for ${botName}:`, e.message);
+                }
             }
+            
+            // Method 2: close (generic bots)
+            if (botInstance && typeof botInstance.close === 'function') {
+                try {
+                    await botInstance.close();
+                    stopped = true;
+                    console.log(`[Bot] Closed connection for: ${botName}`);
+                } catch (e) {
+                    console.warn(`[Bot] close failed for ${botName}:`, e.message);
+                }
+            }
+            
+            // Method 3: disconnect
+            if (botInstance && typeof botInstance.disconnect === 'function') {
+                try {
+                    await botInstance.disconnect();
+                    stopped = true;
+                    console.log(`[Bot] Disconnected: ${botName}`);
+                } catch (e) {
+                    console.warn(`[Bot] disconnect failed for ${botName}:`, e.message);
+                }
+            }
+            
+            // Remove from cache
             cache.runningBots.delete(botName);
-            console.log(`[Bot] Stopped: ${botName}`);
+            console.log(`[Bot] Removed from cache: ${botName}`);
             return true;
+        } else {
+            console.log(`[Bot] Not running: ${botName}`);
+            return false;
         }
-        return false;
     } catch (error) {
         console.error(`[Bot] Failed to stop ${botName}:`, error.message);
+        // Still remove from cache even if stop failed
+        cache.runningBots.delete(botName);
         return false;
     }
 }
@@ -1353,7 +1597,188 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 12. CREATE_BOT - Create new bot
+    // 12. SAVE_SCRIPT - Save script for later use
+    const saveScriptRegex = /<SAVE_SCRIPT>([\s\S]*?)<\/SAVE_SCRIPT>/g;
+    while ((match = saveScriptRegex.exec(aiResponse)) !== null) {
+        const content = match[1].trim();
+        const nameMatch = content.match(/NAME:\s*([^\n]+)/);
+        const descMatch = content.match(/DESCRIPTION:\s*([^\n]+)/);
+        const codeMatch = content.match(/CODE:\s*([\s\S]+)/);
+        
+        if (nameMatch && codeMatch) {
+            const scriptName = nameMatch[1].trim();
+            const description = descMatch ? descMatch[1].trim() : '';
+            const code = codeMatch[1].trim();
+            
+            try {
+                const result = await dataManager.saveScript(scriptName, {
+                    code: code,
+                    description: description,
+                    enabled: true
+                });
+                
+                if (result.success) {
+                    actionsExecuted.push(`💾 Скрипт "${scriptName}" сохранен на GitHub!\nℹ️ ${description}\n▶️ Запустить: <RUN_SCRIPT>${scriptName}</RUN_SCRIPT>`);
+                } else {
+                    actionsExecuted.push('❌ Ошибка сохранения скрипта: ' + result.error);
+                }
+            } catch (error) {
+                actionsExecuted.push('❌ Ошибка сохранения: ' + error.message);
+            }
+        } else {
+            actionsExecuted.push('❌ Неверный формат SAVE_SCRIPT. Нужны: NAME и CODE');
+        }
+    }
+
+    // 13. RUN_SCRIPT - Run saved script
+    const runScriptRegex = /<RUN_SCRIPT>(.*?)<\/RUN_SCRIPT>/g;
+    while ((match = runScriptRegex.exec(aiResponse)) !== null) {
+        const scriptName = match[1].trim();
+        try {
+            const scriptData = await dataManager.getScript(scriptName);
+            if (scriptData) {
+                const enabled = await dataManager.isScriptEnabled(scriptName);
+                if (!enabled) {
+                    actionsExecuted.push(`⏸️ Скрипт "${scriptName}" выключен. Включите его перед запуском.`);
+                } else {
+                    const result = await executeInSandbox(scriptData.code, chatId);
+                    if (result !== undefined && result !== null) {
+                        let resultStr = result;
+                        if (typeof result === 'object') {
+                            try {
+                                resultStr = JSON.stringify(result, null, 2);
+                            } catch (e) {
+                                resultStr = String(result);
+                            }
+                        }
+                        actionsExecuted.push(`▶️ Скрипт "${scriptName}" запущен\n📊 Результат: ${resultStr}`);
+                    } else {
+                        actionsExecuted.push(`✅ Скрипт "${scriptName}" выполнен`);
+                    }
+                }
+            } else {
+                actionsExecuted.push(`❌ Скрипт "${scriptName}" не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push(`❌ Ошибка выполнения скрипта: ` + error.message);
+        }
+    }
+
+    // 14. DISABLE_SCRIPT - Disable script
+    const disableScriptRegex = /<DISABLE_SCRIPT>(.*?)<\/DISABLE_SCRIPT>/g;
+    while ((match = disableScriptRegex.exec(aiResponse)) !== null) {
+        const scriptName = match[1].trim();
+        try {
+            const result = await dataManager.disableScript(scriptName);
+            if (result.success) {
+                actionsExecuted.push(`⏸️ Скрипт "${scriptName}" выключен. Не будет запускаться.`);
+            } else {
+                actionsExecuted.push(`❌ Скрипт "${scriptName}" не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка отключения скрипта: ' + error.message);
+        }
+    }
+
+    // 15. ENABLE_SCRIPT - Enable script
+    const enableScriptRegex = /<ENABLE_SCRIPT>(.*?)<\/ENABLE_SCRIPT>/g;
+    while ((match = enableScriptRegex.exec(aiResponse)) !== null) {
+        const scriptName = match[1].trim();
+        try {
+            const result = await dataManager.enableScript(scriptName);
+            if (result.success) {
+                actionsExecuted.push(`✅ Скрипт "${scriptName}" включен. Можно запускать.`);
+            } else {
+                actionsExecuted.push(`❌ Скрипт "${scriptName}" не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка включения скрипта: ' + error.message);
+        }
+    }
+
+    // 16. DELETE_SCRIPT - Delete script
+    const deleteScriptRegex = /<DELETE_SCRIPT>(.*?)<\/DELETE_SCRIPT>/g;
+    while ((match = deleteScriptRegex.exec(aiResponse)) !== null) {
+        const scriptName = match[1].trim();
+        try {
+            const result = await dataManager.deleteScript(scriptName);
+            if (result.success) {
+                actionsExecuted.push(`✅ Скрипт "${scriptName}" удален из GitHub`);
+            } else {
+                actionsExecuted.push(`❌ Скрипт "${scriptName}" не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка удаления скрипта: ' + error.message);
+        }
+    }
+
+    // 17. LIST_SCRIPTS - List all scripts
+    if (aiResponse.includes('<LIST_SCRIPTS>')) {
+        try {
+            const scriptsData = await dataManager.getAllScripts();
+            const scripts = Object.keys(scriptsData);
+            
+            if (scripts.length === 0) {
+                actionsExecuted.push('📜 Нет скриптов (проверено на GitHub)');
+            } else {
+                let scriptList = '📜 Скрипты (загружено с GitHub):\n\n';
+                for (const name of scripts) {
+                    const scriptData = scriptsData[name];
+                    const enabled = scriptData.enabled !== false;
+                    const status = enabled ? '✅ Включен' : '⏸️ Выключен';
+                    const desc = scriptData.description ? ` - ${scriptData.description}` : '';
+                    scriptList += `  ${status}: ${name}${desc}\n`;
+                }
+                actionsExecuted.push(scriptList);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка загрузки списка: ' + error.message);
+        }
+    }
+
+    // 18. DISABLE_COMMAND - Disable command
+    const disableCommandRegex = /<DISABLE_COMMAND>(.*?)<\/DISABLE_COMMAND>/g;
+    while ((match = disableCommandRegex.exec(aiResponse)) !== null) {
+        const cmdName = match[1].trim();
+        try {
+            const result = await dataManager.disableCommand(cmdName);
+            if (result.success) {
+                // Remove from memory
+                commandsMemory.delete(cmdName);
+                actionsExecuted.push(`⏸️ Команда /${cmdName} выключена. Можно включить обратно.`);
+            } else {
+                actionsExecuted.push(`❌ Команда /${cmdName} не найдена`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка отключения команды: ' + error.message);
+        }
+    }
+
+    // 19. ENABLE_COMMAND - Enable command
+    const enableCommandRegex = /<ENABLE_COMMAND>(.*?)<\/ENABLE_COMMAND>/g;
+    while ((match = enableCommandRegex.exec(aiResponse)) !== null) {
+        const cmdName = match[1].trim();
+        try {
+            const result = await dataManager.enableCommand(cmdName);
+            if (result.success) {
+                // Restore to memory
+                const funcString = await dataManager.getCommand(cmdName);
+                if (funcString) {
+                    const func = eval(`(${funcString})`);
+                    await registerCommandInMemory(cmdName, func);
+                    actionsExecuted.push(`✅ Команда /${cmdName} включена обратно!`);
+                } else {
+                    actionsExecuted.push(`❌ Код команды не найден`);
+                }
+            } else {
+                actionsExecuted.push(`❌ Команда /${cmdName} не найдена`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка включения команды: ' + error.message);
+        }
+    }
+
+    // 20. CREATE_BOT - Create new bot
     const createBotRegex = /<CREATE_BOT>([\s\S]*?)<\/CREATE_BOT>/g;
     while ((match = createBotRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
@@ -1389,7 +1814,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 13. DISABLE_BOT - Disable bot
+    // 21. DISABLE_BOT - Disable bot
     const disableBotRegex = /<DISABLE_BOT>(.*?)<\/DISABLE_BOT>/g;
     while ((match = disableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
@@ -1406,7 +1831,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 14. ENABLE_BOT - Enable bot
+    // 22. ENABLE_BOT - Enable bot
     const enableBotRegex = /<ENABLE_BOT>(.*?)<\/ENABLE_BOT>/g;
     while ((match = enableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
@@ -1428,7 +1853,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 15. DELETE_BOT - Delete bot permanently
+    // 23. DELETE_BOT - Delete bot permanently
     const deleteBotRegex = /<DELETE_BOT>(.*?)<\/DELETE_BOT>/g;
     while ((match = deleteBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
@@ -1444,7 +1869,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 16. LIST_BOTS - List all bots
+    // 24. LIST_BOTS - List all bots
     if (aiResponse.includes('<LIST_BOTS>')) {
         try {
             const botsData = await dataManager.getAllBots();
@@ -1468,7 +1893,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 17. LIST_WEBSITES - List all running websites
+    // 25. LIST_WEBSITES - List all running websites
     if (aiResponse.includes('<LIST_WEBSITES>')) {
         try {
             const websitesData = await dataManager.getAllWebsites();
@@ -1559,12 +1984,18 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             const commands = Object.keys(commandsData);
             
             if (commands.length === 0) {
-                actionsExecuted.push('📝 Нет зарегистрированных команд (проверено на GitHub)');
+                actionsExecuted.push('📝 Нет команд (проверено на GitHub)');
             } else {
-                let cmdList = '🤖 Доступные команды (загружено с GitHub):\n\n';
-                commands.forEach(name => {
-                    cmdList += `  /${name}\n`;
-                });
+                let cmdList = '📝 Команды (загружено с GitHub):\n\n';
+                for (const name of commands) {
+                    const commandData = commandsData[name];
+                    let enabled = true;
+                    if (typeof commandData === 'object') {
+                        enabled = commandData.enabled !== false;
+                    }
+                    const status = enabled ? '✅ Включена' : '⏸️ Выключена';
+                    cmdList += `  ${status}: /${name}\n`;
+                }
                 actionsExecuted.push(cmdList);
             }
         } catch (error) {
@@ -1848,7 +2279,15 @@ bot.on('message', async (msg) => {
         cleanResponse = cleanResponse.replace(/<EXPORT_ALL>/g, '');
         cleanResponse = cleanResponse.replace(/<NPM_INSTALL>.*?<\/NPM_INSTALL>/g, '');
         cleanResponse = cleanResponse.replace(/<DELETE_COMMAND>.*?<\/DELETE_COMMAND>/g, '');
+        cleanResponse = cleanResponse.replace(/<DISABLE_COMMAND>.*?<\/DISABLE_COMMAND>/g, '');
+        cleanResponse = cleanResponse.replace(/<ENABLE_COMMAND>.*?<\/ENABLE_COMMAND>/g, '');
         cleanResponse = cleanResponse.replace(/<LIST_COMMANDS>/g, '');
+        cleanResponse = cleanResponse.replace(/<SAVE_SCRIPT>[\s\S]*?<\/SAVE_SCRIPT>/g, '');
+        cleanResponse = cleanResponse.replace(/<RUN_SCRIPT>.*?<\/RUN_SCRIPT>/g, '');
+        cleanResponse = cleanResponse.replace(/<DISABLE_SCRIPT>.*?<\/DISABLE_SCRIPT>/g, '');
+        cleanResponse = cleanResponse.replace(/<ENABLE_SCRIPT>.*?<\/ENABLE_SCRIPT>/g, '');
+        cleanResponse = cleanResponse.replace(/<DELETE_SCRIPT>.*?<\/DELETE_SCRIPT>/g, '');
+        cleanResponse = cleanResponse.replace(/<LIST_SCRIPTS>/g, '');
         cleanResponse = cleanResponse.replace(/<CREATE_DB>.*?<\/CREATE_DB>/g, '');
         cleanResponse = cleanResponse.replace(/<DB_SET>[\s\S]*?<\/DB_SET>/g, '');
         cleanResponse = cleanResponse.replace(/<DB_GET>[\s\S]*?<\/DB_GET>/g, '');
