@@ -249,22 +249,32 @@ async function callGemini(userMessage, userId) {
         if (!model) {
             const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
             // Try multiple models in order of preference
-            const modelsToTry = ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro'];
-            let lastError;
+            const modelsToTry = [
+                'gemini-1.5-pro',
+                'gemini-1.5-flash', 
+                'gemini-pro',
+                'gemini-1.0-pro'
+            ];
             
+            let lastError = null;
             for (const modelName of modelsToTry) {
                 try {
                     model = genAI.getGenerativeModel({ model: modelName });
-                    console.log(`✅ Using model: ${modelName}`);
+                    // Test the model with a simple prompt
+                    console.log(`✅ Initialized model: ${modelName}`);
                     break;
                 } catch (e) {
                     lastError = e;
-                    console.warn(`⚠️ Model ${modelName} not available, trying next...`);
+                    console.warn(`⚠️ Model ${modelName} failed: ${e.message.substring(0, 100)}`);
                 }
             }
             
             if (!model) {
-                throw new Error('No Gemini models available. Please check your API key at https://ai.google.dev/');
+                const errorMsg = lastError ? lastError.message : 'Unknown error';
+                throw new Error(`❌ No Gemini models available.\n` +
+                    `Error: ${errorMsg.substring(0, 200)}\n\n` +
+                    `Please get a fresh API key from: https://ai.google.dev/\n` +
+                    `See API_KEYS_GUIDE.md for instructions.`);
             }
         }
 
@@ -295,6 +305,30 @@ async function callGemini(userMessage, userId) {
         return response;
     } catch (error) {
         console.error('[Gemini Error]:', error.message);
+        
+        // Provide helpful error messages
+        if (error.message.includes('429') || error.message.includes('quota')) {
+            throw new Error('❌ API ключ исчерпал квоту!\n\n' +
+                'Решение:\n' +
+                '1. Получите свой БЕСПЛАТНЫЙ ключ: https://ai.google.dev/\n' +
+                '2. Добавьте в .env: GEMINI_API_KEY=ваш_ключ\n' +
+                '3. Перезапустите бот\n\n' +
+                '📖 См. API_KEYS_GUIDE.md для инструкций');
+        } else if (error.message.includes('404') || error.message.includes('not found')) {
+            throw new Error('❌ Модель Gemini не найдена!\n\n' +
+                'Решение:\n' +
+                '1. Проверьте API ключ: https://ai.google.dev/\n' +
+                '2. Получите новый ключ\n' +
+                '3. Обновите .env файл\n\n' +
+                '📖 См. API_KEYS_GUIDE.md для инструкций');
+        } else if (error.message.includes('401') || error.message.includes('API key')) {
+            throw new Error('❌ Неверный API ключ!\n\n' +
+                'Решение:\n' +
+                '1. Проверьте API ключ в .env\n' +
+                '2. Получите новый: https://ai.google.dev/\n\n' +
+                '📖 См. API_KEYS_GUIDE.md');
+        }
+        
         throw new Error('AI временно недоступен: ' + error.message);
     }
 }
