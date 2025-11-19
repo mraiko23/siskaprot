@@ -258,7 +258,8 @@ class GitHubDataManager {
     async saveWebsite(routePath, code) {
         console.log(`[DataManager] 💾 Saving website: ${routePath}`);
         const websitesData = await this.getAllWebsites();
-        websitesData[routePath] = code;
+        // Save in new format with enabled flag
+        websitesData[routePath] = { code: code, enabled: true };
         const result = await this.github.saveFile(
             'bot-data/websites.json', 
             JSON.stringify(websitesData, null, 2), 
@@ -281,7 +282,13 @@ class GitHubDataManager {
 
     async getWebsite(routePath) {
         const websitesData = await this.getAllWebsites();
-        return websitesData[routePath] || null;
+        const website = websitesData[routePath];
+        if (!website) return null;
+        // Handle both old format (string) and new format (object)
+        if (typeof website === 'string') {
+            return website; // Old format
+        }
+        return website.code; // New format
     }
 
     async getAllWebsites() {
@@ -290,6 +297,54 @@ class GitHubDataManager {
             return JSON.parse(result.content);
         }
         return {};
+    }
+
+    async disableWebsite(routePath) {
+        console.log(`[DataManager] 🔌 Disabling website: ${routePath}`);
+        const websitesData = await this.getAllWebsites();
+        if (websitesData[routePath]) {
+            // Add disabled flag to the website data
+            if (typeof websitesData[routePath] === 'string') {
+                websitesData[routePath] = { code: websitesData[routePath], enabled: false };
+            } else {
+                websitesData[routePath].enabled = false;
+            }
+            const result = await this.github.saveFile(
+                'bot-data/websites.json', 
+                JSON.stringify(websitesData, null, 2), 
+                `Disable website: ${routePath}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Website not found' };
+    }
+
+    async enableWebsite(routePath) {
+        console.log(`[DataManager] ✅ Enabling website: ${routePath}`);
+        const websitesData = await this.getAllWebsites();
+        if (websitesData[routePath]) {
+            // Enable the website
+            if (typeof websitesData[routePath] === 'string') {
+                websitesData[routePath] = { code: websitesData[routePath], enabled: true };
+            } else {
+                websitesData[routePath].enabled = true;
+            }
+            const result = await this.github.saveFile(
+                'bot-data/websites.json', 
+                JSON.stringify(websitesData, null, 2), 
+                `Enable website: ${routePath}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Website not found' };
+    }
+
+    async isWebsiteEnabled(routePath) {
+        const websitesData = await this.getAllWebsites();
+        const website = websitesData[routePath];
+        if (!website) return false;
+        if (typeof website === 'string') return true; // Old format, enabled by default
+        return website.enabled !== false; // New format
     }
 
     // ========== DATABASES ==========
@@ -383,15 +438,31 @@ class GitHubDataManager {
         // Load and restore websites
         const websitesData = await this.getAllWebsites();
         let websiteCount = 0;
-        for (const [path, code] of Object.entries(websitesData)) {
+        let disabledCount = 0;
+        for (const [path, websiteData] of Object.entries(websitesData)) {
             try {
-                await restoreWebsite(path, code);
-                websiteCount++;
+                // Handle both old format (string) and new format (object)
+                let code, enabled;
+                if (typeof websiteData === 'string') {
+                    code = websiteData;
+                    enabled = true; // Old format, enabled by default
+                } else {
+                    code = websiteData.code;
+                    enabled = websiteData.enabled !== false;
+                }
+                
+                if (enabled) {
+                    await restoreWebsite(path, code);
+                    websiteCount++;
+                } else {
+                    console.log(`[DataManager] ⏸️ Skipping disabled website: ${path}`);
+                    disabledCount++;
+                }
             } catch (e) {
                 console.error(`[DataManager] Failed to restore website ${path}:`, e.message);
             }
         }
-        console.log(`[DataManager] ✅ Loaded ${websiteCount} websites`);
+        console.log(`[DataManager] ✅ Loaded ${websiteCount} websites (${disabledCount} disabled)`);
 
         console.log('[DataManager] 🎉 All data loaded from GitHub!');
     }
@@ -578,10 +649,25 @@ async function callOpenRouter(messages) {
 
 7. 🛠️ УПРАВЛЕНИЕ
    <LIST_COMMANDS> - список команд
-   <DELETE_COMMAND>cmdname</DELETE_COMMAND>
+   <DELETE_COMMAND>cmdname</DELETE_COMMAND> - УДАЛИТЬ команду (безвозвратно)
    <LIST_WEBSITES> - список сайтов
-   <STOP_WEBSITE>/path</STOP_WEBSITE>
+   <DISABLE_WEBSITE>/path</DISABLE_WEBSITE> - ВЫКЛЮЧИТЬ сайт (можно включить обратно)
+   <ENABLE_WEBSITE>/path</ENABLE_WEBSITE> - ВКЛЮЧИТЬ сайт обратно
+   <DELETE_WEBSITE>/path</DELETE_WEBSITE> - УДАЛИТЬ сайт полностью (безвозвратно)
    <EXPORT_ALL> - экспорт всех данных
+
+⚠️ ВАЖНО: Различай действия!
+   - "Выключи/отключи/останови/вырубить" = используй <DISABLE_WEBSITE> (сайт можно включить)
+   - "Удали/убери навсегда/удалить полностью" = используй <DELETE_WEBSITE> (безвозвратно)
+   - "Включи обратно/запусти снова/включи опять" = используй <ENABLE_WEBSITE>
+
+Примеры:
+   Пользователь: "выключи сайт /test" → <DISABLE_WEBSITE>/test</DISABLE_WEBSITE>
+   Пользователь: "вырубить бота на /api" → <DISABLE_WEBSITE>/api</DISABLE_WEBSITE>
+   Пользователь: "включи обратно /test" → <ENABLE_WEBSITE>/test</ENABLE_WEBSITE>
+   Пользователь: "удали сайт /old навсегда" → <DELETE_WEBSITE>/old</DELETE_WEBSITE>
+
+🚫 НЕ СОЗДАВАЙ отдельные команды для включения/выключения - используй теги напрямую!
 
 8. 💻 ВЫПОЛНЕНИЕ КОДА
    <EXECUTE_NOW>
@@ -693,6 +779,13 @@ async function deleteCommand(commandName) {
 
 async function restoreWebsite(routePath, code) {
     try {
+        // Check if website is enabled
+        const enabled = await dataManager.isWebsiteEnabled(routePath);
+        if (!enabled) {
+            console.log(`[Website] Skipped (disabled): ${routePath}`);
+            return false;
+        }
+        
         const sandbox = createSandbox(null);
         const context = vm.createContext(sandbox);
         const script = new vm.Script(code);
@@ -985,35 +1078,89 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 9. STOP_WEBSITE - Stop and remove website
-    const stopWebsiteRegex = /<STOP_WEBSITE>(.*?)<\/STOP_WEBSITE>/g;
-    while ((match = stopWebsiteRegex.exec(aiResponse)) !== null) {
+    // 9. DISABLE_WEBSITE - Disable website (can be re-enabled)
+    const disableWebsiteRegex = /<DISABLE_WEBSITE>(.*?)<\/DISABLE_WEBSITE>/g;
+    while ((match = disableWebsiteRegex.exec(aiResponse)) !== null) {
         const routePath = match[1].trim();
         try {
-            const success = await deleteWebsite(routePath);
-            if (success) {
-                actionsExecuted.push(`✅ Сайт ${routePath} остановлен и удалён из GitHub`);
+            const result = await dataManager.disableWebsite(routePath);
+            if (result.success) {
+                // Remove from Express routes
+                if (app._router && app._router.stack) {
+                    app._router.stack = app._router.stack.filter(layer => {
+                        if (layer.route) {
+                            return layer.route.path !== routePath;
+                        }
+                        return true;
+                    });
+                }
+                actionsExecuted.push(`⏸️ Сайт ${routePath} выключен. Можно включить обратно.`);
             } else {
                 actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
             }
         } catch (error) {
-            actionsExecuted.push('❌ Ошибка остановки сайта: ' + error.message);
+            actionsExecuted.push('❌ Ошибка отключения сайта: ' + error.message);
         }
     }
 
-    // 10. LIST_WEBSITES - List all running websites
+    // 10. ENABLE_WEBSITE - Enable website
+    const enableWebsiteRegex = /<ENABLE_WEBSITE>(.*?)<\/ENABLE_WEBSITE>/g;
+    while ((match = enableWebsiteRegex.exec(aiResponse)) !== null) {
+        const routePath = match[1].trim();
+        try {
+            const result = await dataManager.enableWebsite(routePath);
+            if (result.success) {
+                // Restore website to Express
+                const code = await dataManager.getWebsite(routePath);
+                if (code) {
+                    await restoreWebsite(routePath, code);
+                    actionsExecuted.push(`✅ Сайт ${routePath} включен обратно!\n🔗 http://localhost:${CONFIG.PORT}${routePath}`);
+                } else {
+                    actionsExecuted.push(`❌ Код сайта не найден`);
+                }
+            } else {
+                actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка включения сайта: ' + error.message);
+        }
+    }
+
+    // 11. DELETE_WEBSITE - Delete website permanently
+    const deleteWebsiteRegex = /<DELETE_WEBSITE>(.*?)<\/DELETE_WEBSITE>/g;
+    while ((match = deleteWebsiteRegex.exec(aiResponse)) !== null) {
+        const routePath = match[1].trim();
+        try {
+            const success = await deleteWebsite(routePath);
+            if (success) {
+                actionsExecuted.push(`✅ Сайт ${routePath} полностью удалён из GitHub`);
+            } else {
+                actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка удаления сайта: ' + error.message);
+        }
+    }
+
+    // 12. LIST_WEBSITES - List all running websites
     if (aiResponse.includes('<LIST_WEBSITES>')) {
         try {
             const websitesData = await dataManager.getAllWebsites();
             const websites = Object.keys(websitesData);
             
             if (websites.length === 0) {
-                actionsExecuted.push('🌐 Нет запущенных сайтов (проверено на GitHub)');
+                actionsExecuted.push('🌐 Нет сайтов (проверено на GitHub)');
             } else {
-                let siteList = '🌐 Запущенные сайты (загружено с GitHub):\n\n';
-                websites.forEach(path => {
-                    siteList += `  http://localhost:${CONFIG.PORT}${path}\n`;
-                });
+                let siteList = '🌐 Сайты (загружено с GitHub):\n\n';
+                for (const path of websites) {
+                    const websiteData = websitesData[path];
+                    let enabled = true;
+                    if (typeof websiteData === 'object') {
+                        enabled = websiteData.enabled !== false;
+                    }
+                    const status = enabled ? '✅ Включен' : '⏸️ Выключен';
+                    siteList += `  ${status}: http://localhost:${CONFIG.PORT}${path}\n`;
+                }
                 actionsExecuted.push(siteList);
             }
         } catch (error) {
