@@ -70,7 +70,8 @@ app.use(express.static('public'));
 
 const cache = {
     conversations: new Map(), // Only conversations kept in memory
-    runningBots: new Map()    // Active bot instances (can't be serialized)
+    runningBots: new Map(),   // Active bot instances (can't be serialized)
+    botUsernames: new Map()   // Map Telegram bot username (lowercased) -> internal botName
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -847,7 +848,6 @@ async function searchInternet(query, maxResults = 5) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function callOpenRouter(messages, imageUrl = null) {
-    try {
         const systemPrompt = {
             role: 'system',
             content: `Ты - SHERLOCK, мощнейший AI-ассистент с расширенными возможностями! 🚀
@@ -1024,57 +1024,95 @@ async function callOpenRouter(messages, imageUrl = null) {
 
         // Prepare messages array
         let messagesArray = [systemPrompt, ...messages];
-        
-        // If there's an image, add it to the last user message
-        if (imageUrl) {
-            console.log('[AI] Adding image to request');
-            // Find the last user message and add image
-            const lastUserMsgIndex = messagesArray.length - 1;
-            if (messagesArray[lastUserMsgIndex].role === 'user') {
-                messagesArray[lastUserMsgIndex] = {
-                    role: 'user',
-                    content: [
-                        {
-                            type: 'text',
-                            text: messagesArray[lastUserMsgIndex].content
-                        },
-                        {
-                            type: 'image_url',
-                            image_url: {
-                                url: imageUrl
-                            }
-                        }
-                    ]
-                };
+
+        // Normalize messages to expected { role, content } shape (content as string)
+        messagesArray = messagesArray.map(msg => {
+            if (!msg) return { role: 'user', content: '' };
+            // If message is a plain string, treat as user text
+            if (typeof msg === 'string') return { role: 'user', content: msg };
+            // If content is an object/array, try to stringify a reasonable representation
+            if (msg.content && typeof msg.content !== 'string') {
+                try {
+                    // If it contains text field(s), prefer them
+                    if (msg.content.text) return { role: msg.role || 'user', content: String(msg.content.text) };
+                    return { role: msg.role || 'user', content: JSON.stringify(msg.content) };
+                } catch (e) {
+                    return { role: msg.role || 'user', content: '' };
+                }
             }
+            return { role: msg.role || 'user', content: String(msg.content || '') };
+        });
+
+        // If there's an image, append the image URL (as a markdown link) to the last user message content.
+        // Many chat endpoints don't accept complex nested content, so sending the URL inline is more robust.
+        if (imageUrl) {
+            console.log('[AI] Adding image URL to request');
+            const lastIdx = messagesArray.length - 1;
+            if (messagesArray[lastIdx].role !== 'user') {
+                // Ensure we have a user message to attach the image to
+                messagesArray.push({ role: 'user', content: '' });
+            }
+            const existingText = messagesArray[lastIdx].content || '';
+            // Append image link on a new line so it's clearly separated
+            messagesArray[lastIdx].content = `${existingText}\n\n[Image](${imageUrl})`;
         }
 
-        const response = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            {
-                model: CONFIG.AI_MODEL,
-                messages: messagesArray,
-                temperature: 0.7,
-                max_tokens: 4000
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.OPENROUTER_API_KEY}`,
-                    'Content-Type': 'application/json',
-                    'HTTP-Referer': 'https://github.com/your-repo',
-                    'X-Title': 'Sherlock Telegram Bot'
+        try {
+            const response = await axios.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                {
+                    model: CONFIG.AI_MODEL,
+                    messages: messagesArray,
+                    temperature: 0.7,
+                    max_tokens: 4000
                 },
-                timeout: CONFIG.TIMEOUT
-            }
-        );
+                {
+                    headers: {
+                        'Authorization': `Bearer ${CONFIG.OPENROUTER_API_KEY}`,
+                        'Content-Type': 'application/json',
+                        'X-Title': 'Sherlock Telegram Bot'
+                    },
+                    timeout: CONFIG.TIMEOUT
+                }
+            );
 
-        const aiMessage = response.data.choices[0].message.content;
-        console.log(`[AI] Response length: ${aiMessage.length} chars`);
-        return aiMessage;
-    } catch (error) {
-        console.error('[AI Error]', error.response?.data || error.message);
-        throw new Error('AI service temporarily unavailable: ' + error.message);
-    }
+            // Handle different possible shapes of the response robustly
+            let aiMessage = '';
+            if (response && response.data) {
+                // OpenRouter / Chat-style: choices[0].message.content
+                if (Array.isArray(response.data.choices) && response.data.choices[0]) {
+                    aiMessage = response.data.choices[0].message?.content ?? response.data.choices[0].content ?? '';
+                } else if (response.data.output && typeof response.data.output === 'object') {
+                    // Some responses use output.text
+                    aiMessage = response.data.output.text ?? JSON.stringify(response.data.output);
+                } else if (typeof response.data === 'string') {
+                    aiMessage = response.data;
+                } else {
+                    aiMessage = JSON.stringify(response.data);
+                }
+            }
+
+            console.log(`[AI] Response length: ${String(aiMessage).length} chars`);
+            return aiMessage;
+        } catch (error) {
+            // Log full details for debugging
+            console.error('[AI Error] status:', error.response?.status, 'data:', error.response?.data || error.message);
+
+            const status = error.response?.status;
+            const respData = error.response?.data;
+
+            // Provide clearer, actionable errors for common cases
+            if (status === 401 || status === 403) {
+                throw new Error('AI service authentication error: ' + (respData?.message || error.message));
+            }
+            if (status === 400) {
+                // Bad request: likely malformed input (e.g., wrong messages shape or unsupported image format)
+                throw new Error('AI service rejected the request (400 Bad Request): ' + (typeof respData === 'object' ? JSON.stringify(respData) : String(respData || error.message)));
+            }
+
+            // Fallback: preserve existing behavior but include more context
+            throw new Error('AI service temporarily unavailable: ' + (respData?.message || error.message));
+        }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1217,9 +1255,29 @@ async function restoreBot(botName, token, code) {
         const sandbox = createSandbox(null);
         sandbox.botToken = token;
         sandbox.botName = botName;
-        sandbox.setBotInstance = (bot) => {
-            cache.runningBots.set(botName, bot);
-            console.log(`[Bot] Instance registered: ${botName}`);
+        sandbox.setBotInstance = async (botInstance) => {
+            try {
+                cache.runningBots.set(botName, botInstance);
+
+                // Try to resolve bot username (if available) and keep mapping for reply-based shutdowns
+                if (botInstance && typeof botInstance.getMe === 'function') {
+                    try {
+                        const me = await botInstance.getMe();
+                        const username = (me && (me.username || me.result?.username)) || null;
+                        if (username) {
+                            cache.botUsernames.set(String(username).toLowerCase(), botName);
+                            console.log(`[Bot] Instance registered: ${botName} (username: ${username})`);
+                            return;
+                        }
+                    } catch (e) {
+                        console.warn(`[Bot] getMe() failed for ${botName}:`, e.message);
+                    }
+                }
+
+                console.log(`[Bot] Instance registered: ${botName}`);
+            } catch (e) {
+                console.error(`[Bot] Error registering instance for ${botName}:`, e.message);
+            }
         };
         
         // Execute bot code in sandbox
@@ -1324,6 +1382,16 @@ async function stopBot(botName) {
         
         // Remove from cache
         cache.runningBots.delete(botName);
+        // Also remove any username mappings that pointed to this internal bot name
+        try {
+            for (const [username, name] of cache.botUsernames.entries()) {
+                if (name === botName) {
+                    cache.botUsernames.delete(username);
+                }
+            }
+        } catch (e) {
+            console.warn(`[Bot] Warning cleaning username mappings for ${botName}:`, e.message);
+        }
         console.log(`[Bot] 🗑️ Removed from cache: ${botName}`);
         
         if (stopped) {
@@ -2339,6 +2407,37 @@ bot.on('message', async (msg) => {
         }
     }
     
+    // Quick natural-language handler: allow stopping a bot by replying to its message and writing "выключи/выключить/отключи" etc.
+    try {
+        const lowerText = (text || '').toLowerCase();
+        const shutdownTriggers = ['выключи', 'выключить', 'отключи', 'выруби', 'убери'];
+        if (msg.reply_to_message && shutdownTriggers.some(t => lowerText.includes(t))) {
+            const replyFrom = msg.reply_to_message.from;
+            let targetBotName = null;
+            if (replyFrom && replyFrom.username) {
+                targetBotName = cache.botUsernames.get(replyFrom.username.toLowerCase());
+            }
+            if (!targetBotName && msg.reply_to_message.text) {
+                const m = msg.reply_to_message.text.match(/["«](.+?)["»]/);
+                if (m) targetBotName = m[1].trim();
+            }
+            if (targetBotName) {
+                try {
+                    const stopped = await stopBot(targetBotName);
+                    const stopResultText = stopped ? '✅ успешно остановлён' : '⚠️ произошла ошибка при остановке';
+                    // Try disabling in GitHub as well (best-effort)
+                    try { await dataManager.disableBot(targetBotName); } catch (e) { /* ignore */ }
+                    await bot.sendMessage(chatId, `⏸️ Бот "${targetBotName}" ${stopResultText}.`);
+                } catch (e) {
+                    await bot.sendMessage(chatId, `❌ Ошибка при остановке бота "${targetBotName}": ${e.message}`);
+                }
+                return;
+            }
+        }
+    } catch (nlErr) {
+        console.warn('[NL Handler] Error:', nlErr.message);
+    }
+
     try {
         const history = getConversationHistory(userId);
         
