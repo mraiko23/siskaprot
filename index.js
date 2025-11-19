@@ -18,7 +18,7 @@ const CONFIG = {
     TELEGRAM_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
     GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-    GITHUB_REPO: process.env.GITHUB_REPO || 'Trailblazer-Labs/sherlock-data',
+    GITHUB_REPO: process.env.GITHUB_REPO || 'mraiko23/doars',
     PORT: process.env.PORT || 3000,
     AI_MODEL: 'openrouter/sherlock-dash-alpha',
     MAX_HISTORY: 100,
@@ -81,30 +81,14 @@ class GitHubStorage {
         this.token = token;
         this.repo = repo;
         this.baseUrl = 'https://api.github.com';
-        this.enabled = !!token && token !== 'undefined';
-        
-        if (!this.enabled) {
-            console.warn('[GitHub] ⚠️ GitHub token not configured. GitHub features will be disabled.');
-            console.warn('[GitHub] To enable: Set GITHUB_TOKEN in .env file');
-        }
-        
         this.headers = {
-            'Authorization': token ? `Bearer ${token}` : '',
-            'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
+            'Authorization': `token ${token}`,
+            'Accept': 'application/vnd.github.v3+json',
             'Content-Type': 'application/json'
         };
     }
 
     async saveFile(filePath, content, message = 'Update file via bot') {
-        if (!this.enabled) {
-            return { 
-                success: false, 
-                error: 'GitHub не настроен. Добавьте GITHUB_TOKEN в .env файл',
-                needsSetup: true
-            };
-        }
-        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${filePath}`;
             
@@ -129,30 +113,12 @@ class GitHubStorage {
             console.log(`[GitHub] ✅ Saved: ${filePath}`);
             return { success: true, url: response.data.content.html_url };
         } catch (error) {
-            console.error(`[GitHub] ❌ Save error:`, error.response?.data || error.message);
-            
-            let errorMsg = error.message;
-            if (error.response?.status === 401) {
-                errorMsg = 'Неверный GitHub токен. Проверьте GITHUB_TOKEN в .env файле';
-            } else if (error.response?.status === 404) {
-                errorMsg = `Репозиторий ${this.repo} не найден. Проверьте GITHUB_REPO в .env`;
-            } else if (error.response?.status === 403) {
-                errorMsg = 'Нет прав доступа к репозиторию. Проверьте права токена';
-            }
-            
-            return { success: false, error: errorMsg };
+            console.error(`[GitHub] ❌ Save error: ${error.message}`);
+            return { success: false, error: error.message };
         }
     }
 
     async loadFile(filePath) {
-        if (!this.enabled) {
-            return { 
-                success: false, 
-                error: 'GitHub не настроен. Добавьте GITHUB_TOKEN в .env файл',
-                needsSetup: true
-            };
-        }
-        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${filePath}`;
             const response = await axios.get(url, { headers: this.headers });
@@ -160,28 +126,12 @@ class GitHubStorage {
             console.log(`[GitHub] ✅ Loaded: ${filePath}`);
             return { success: true, content };
         } catch (error) {
-            console.error(`[GitHub] ❌ Load error:`, error.response?.data || error.message);
-            
-            let errorMsg = error.message;
-            if (error.response?.status === 401) {
-                errorMsg = 'Неверный GitHub токен';
-            } else if (error.response?.status === 404) {
-                errorMsg = `Файл ${filePath} не найден в репозитории`;
-            }
-            
-            return { success: false, error: errorMsg };
+            console.error(`[GitHub] ❌ Load error: ${error.message}`);
+            return { success: false, error: error.message };
         }
     }
 
     async deleteFile(filePath, message = 'Delete file via bot') {
-        if (!this.enabled) {
-            return { 
-                success: false, 
-                error: 'GitHub не настроен',
-                needsSetup: true
-            };
-        }
-        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${filePath}`;
             
@@ -197,20 +147,12 @@ class GitHubStorage {
             console.log(`[GitHub] ✅ Deleted: ${filePath}`);
             return { success: true };
         } catch (error) {
-            console.error(`[GitHub] ❌ Delete error:`, error.response?.data || error.message);
+            console.error(`[GitHub] ❌ Delete error: ${error.message}`);
             return { success: false, error: error.message };
         }
     }
 
     async listFiles(dirPath = '') {
-        if (!this.enabled) {
-            return { 
-                success: false, 
-                error: 'GitHub не настроен',
-                needsSetup: true
-            };
-        }
-        
         try {
             const url = `${this.baseUrl}/repos/${this.repo}/contents/${dirPath}`;
             const response = await axios.get(url, { headers: this.headers });
@@ -222,14 +164,8 @@ class GitHubStorage {
             }));
             return { success: true, files };
         } catch (error) {
-            console.error(`[GitHub] ❌ List error:`, error.response?.data || error.message);
-            
-            let errorMsg = error.message;
-            if (error.response?.status === 404) {
-                errorMsg = `Папка ${dirPath || 'корневая'} не найдена`;
-            }
-            
-            return { success: false, error: errorMsg };
+            console.error(`[GitHub] ❌ List error: ${error.message}`);
+            return { success: false, error: error.message };
         }
     }
 }
@@ -242,76 +178,27 @@ const githubStorage = new GitHubStorage(CONFIG.GITHUB_TOKEN, CONFIG.GITHUB_REPO)
 
 async function fetchWebContent(url) {
     try {
-        // Validate URL
-        if (!url || typeof url !== 'string') {
-            throw new Error('Invalid URL provided');
-        }
-        
-        // Add protocol if missing
-        if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            url = 'https://' + url;
-        }
-        
-        // Validate URL format
-        try {
-            new URL(url);
-        } catch (e) {
-            throw new Error('Неверный формат URL. Пример: https://example.com');
-        }
-        
-        console.log(`[Fetch] Loading: ${url}`);
-        
         const response = await axios.get(url, {
             timeout: 30000,
-            maxRedirects: 5,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
         
         // Extract text content (simple HTML stripping)
-        let text = String(response.data);
-        
-        // Remove scripts and styles
-        text = text.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+        let text = response.data.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
         text = text.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
-        
-        // Extract title
-        const titleMatch = text.match(/<title[^>]*>([^<]+)<\/title>/i);
-        const title = titleMatch ? titleMatch[1].trim() : 'Без заголовка';
-        
-        // Remove HTML tags
         text = text.replace(/<[^>]+>/g, ' ');
-        
-        // Decode HTML entities
-        text = text.replace(/&nbsp;/g, ' ');
-        text = text.replace(/&amp;/g, '&');
-        text = text.replace(/&lt;/g, '<');
-        text = text.replace(/&gt;/g, '>');
-        text = text.replace(/&quot;/g, '"');
-        text = text.replace(/&#39;/g, "'");
-        
-        // Clean whitespace
         text = text.replace(/\s+/g, ' ').trim();
-        
-        console.log(`[Fetch] Success: ${text.length} chars extracted`);
         
         return {
             success: true,
-            title,
             content: text.substring(0, 5000), // Limit to 5000 chars
             fullLength: text.length,
             url
         };
     } catch (error) {
-        console.error(`[Fetch] Error loading ${url}:`, error.message);
-        return { 
-            success: false, 
-            error: error.message,
-            url
-        };
+        return { success: false, error: error.message };
     }
 }
 
@@ -321,86 +208,33 @@ async function fetchWebContent(url) {
 
 async function searchInternet(query, maxResults = 5) {
     try {
-        console.log(`[Search] Searching for: ${query}`);
-        
-        // Using SerpAPI-like search with DuckDuckGo Lite
-        const searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+        // Using DuckDuckGo HTML search (no API key needed)
+        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
         const response = await axios.get(searchUrl, {
             timeout: 30000,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
 
-        // Parse results - multiple patterns for better extraction
+        // Parse results (simple regex extraction)
         const results = [];
-        const html = response.data;
-        
-        // Pattern 1: Standard links
-        const linkRegex = /<a[^>]+class="[^"]*result[^"]*"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
-        // Pattern 2: Title links  
-        const titleRegex = /<a[^>]*href="([^"]+)"[^>]*>\s*<span[^>]*>([^<]+)<\/span>/gi;
-        // Pattern 3: Simple links with titles
-        const simpleRegex = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([^<]+(?:<[^>]+>[^<]*<\/[^>]+>)*[^<]*)<\/a>/gi;
-        
+        const resultRegex = /<a class="result__a" href="([^"]+)">([^<]+)<\/a>/g;
         let match;
-        const patterns = [linkRegex, titleRegex, simpleRegex];
-        
-        for (const pattern of patterns) {
-            while ((match = pattern.exec(html)) !== null && results.length < maxResults) {
-                const url = match[1].trim();
-                const title = match[2].trim().replace(/<[^>]+>/g, '');
-                
-                // Filter valid URLs
-                if (url.startsWith('http') && !url.includes('duckduckgo.com') && title.length > 3) {
-                    results.push({
-                        title: title.substring(0, 200),
-                        url: url
-                    });
-                }
-            }
-            if (results.length >= maxResults) break;
-        }
+        let count = 0;
 
-        // Fallback: Try alternative search API
-        if (results.length === 0) {
-            console.log('[Search] Trying alternative method...');
-            const altUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&format=json`;
-            try {
-                const altResponse = await axios.get(altUrl, { timeout: 10000 });
-                if (altResponse.data && altResponse.data.RelatedTopics) {
-                    altResponse.data.RelatedTopics.slice(0, maxResults).forEach(topic => {
-                        if (topic.FirstURL && topic.Text) {
-                            results.push({
-                                title: topic.Text.substring(0, 200),
-                                url: topic.FirstURL
-                            });
-                        }
-                    });
-                }
-            } catch (e) {
-                console.error('[Search] Alternative method failed:', e.message);
-            }
-        }
-        
-        // If still no results, provide helpful mock results
-        if (results.length === 0) {
+        while ((match = resultRegex.exec(response.data)) !== null && count < maxResults) {
             results.push({
-                title: `Результаты по запросу "${query}" (используйте <FETCH_URL> для прямого просмотра сайтов)`,
-                url: `https://www.google.com/search?q=${encodeURIComponent(query)}`
+                title: match[2].trim(),
+                url: match[1]
             });
+            count++;
         }
 
-        console.log(`[Search] Found ${results.length} results`);
         return { success: true, query, results };
     } catch (error) {
         console.error('[Search] Error:', error.message);
-        // Return helpful error with suggestion
-        return { 
-            success: false, 
-            error: error.message,
-            suggestion: 'Попробуйте использовать <FETCH_URL> для прямого чтения сайтов'
-        };
+        return { success: false, error: error.message };
     }
 }
 
@@ -835,23 +669,16 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         try {
             const result = await searchInternet(query);
             if (result.success) {
-                if (result.results && result.results.length > 0) {
-                    let output = `🔍 **Результаты поиска "${query}":**\n\n`;
-                    result.results.forEach((r, i) => {
-                        output += `${i + 1}. **${r.title}**\n   🔗 ${r.url}\n\n`;
-                    });
-                    actionsExecuted.push(output);
-                } else {
-                    actionsExecuted.push(`🔍 Поиск "${query}" не дал результатов. Попробуйте другой запрос или используйте <FETCH_URL> для прямого просмотра сайтов.`);
-                }
+                let output = `🔍 Результаты поиска "${query}":\n\n`;
+                result.results.forEach((r, i) => {
+                    output += `${i + 1}. ${r.title}\n   ${r.url}\n\n`;
+                });
+                actionsExecuted.push(output);
             } else {
-                const errorMsg = result.suggestion ? 
-                    `❌ Ошибка поиска: ${result.error}\n💡 ${result.suggestion}` : 
-                    `❌ Ошибка поиска: ${result.error}`;
-                actionsExecuted.push(errorMsg);
+                actionsExecuted.push('❌ Ошибка поиска: ' + result.error);
             }
         } catch (error) {
-            actionsExecuted.push(`❌ Ошибка поиска: ${error.message}\n💡 Попробуйте использовать <FETCH_URL> для прямого чтения сайтов`);
+            actionsExecuted.push('❌ Ошибка поиска: ' + error.message);
         }
     }
 
@@ -862,18 +689,12 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         try {
             const result = await fetchWebContent(url);
             if (result.success) {
-                let output = `🌐 **${result.title || 'Содержимое сайта'}**\n`;
-                output += `🔗 ${result.url}\n\n`;
-                output += `${result.content}`;
-                if (result.fullLength > result.content.length) {
-                    output += `\n\n📊 Показано ${result.content.length} из ${result.fullLength} символов`;
-                }
-                actionsExecuted.push(output);
+                actionsExecuted.push(`🌐 Содержимое ${url}:\n\n${result.content}...\n\n(Показано ${result.content.length}/${result.fullLength} символов)`);
             } else {
-                actionsExecuted.push(`❌ Ошибка загрузки ${result.url || url}: ${result.error}`);
+                actionsExecuted.push('❌ Ошибка загрузки: ' + result.error);
             }
         } catch (error) {
-            actionsExecuted.push(`❌ Ошибка загрузки: ${error.message}`);
+            actionsExecuted.push('❌ Ошибка загрузки: ' + error.message);
         }
     }
 
