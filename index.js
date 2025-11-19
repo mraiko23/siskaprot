@@ -358,6 +358,8 @@ bot.on('message', async (msg) => {
 
 1️⃣5️⃣ ОСТАНОВИТЬ БОТА:
 <STOP_BOT>токен</STOP_BOT>
+// Для остановки ВСЕХ ботов используй пустой токен:
+<STOP_BOT></STOP_BOT>
 
 1️⃣6️⃣ СПИСОК БОТОВ:
 <LIST_BOTS></LIST_BOTS>
@@ -924,41 +926,68 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     while ((match = stopBotRegex.exec(aiResponse)) !== null) {
         const token = match[1].trim();
         let stopped = false;
+        
+        // Collect bots to stop
+        const botsToStop = [];
         for (const [id, entry] of storage.runningBots) {
-            if (entry.token === token) {
+            if (!token || token === '' || entry.token === token || entry.token.includes(token.substring(0, 10))) {
+                botsToStop.push({ id, entry });
+            }
+        }
+        
+        if (botsToStop.length === 0) {
+            actionsExecuted.push('❌ Бот с указанным токеном не найден');
+        } else {
+            for (const { id, entry } of botsToStop) {
                 try {
                     // Mark bot as stopped to prevent further processing
                     entry.stopped = true;
                     
-                    // Remove all event listeners first
+                    console.log(`[Bot Manager] Stopping bot ${id}...`);
+                    
+                    // Remove all event listeners first (synchronous, safe)
                     if (entry.bot.removeAllListeners) {
                         entry.bot.removeAllListeners();
+                        console.log(`[Bot Manager] Removed listeners for ${id}`);
                     }
                     
-                    // Stop polling with proper cleanup
-                    if (entry.bot.stopPolling) {
-                        await entry.bot.stopPolling({ cancel: true, reason: 'Bot stopped by user' });
+                    // Try to stop polling (might fail with rate limit)
+                    try {
+                        if (entry.bot.stopPolling) {
+                            await entry.bot.stopPolling({ cancel: true, reason: 'Bot stopped by user' });
+                            console.log(`[Bot Manager] Stopped polling for ${id}`);
+                        }
+                    } catch (pollingError) {
+                        // Ignore rate limit errors - bot will stop anyway without listeners
+                        console.log(`[Bot Manager] Polling stop warning for ${id}: ${pollingError.message}`);
                     }
                     
-                    // Close the bot connection
-                    if (entry.bot.close) {
-                        await entry.bot.close();
+                    // Try to close connection (might fail with rate limit)
+                    try {
+                        if (entry.bot.close) {
+                            await entry.bot.close();
+                            console.log(`[Bot Manager] Closed connection for ${id}`);
+                        }
+                    } catch (closeError) {
+                        // Ignore rate limit errors
+                        console.log(`[Bot Manager] Close warning for ${id}: ${closeError.message}`);
                     }
                     
-                    // Remove from storage
+                    // Always remove from storage (most important step)
                     storage.runningBots.delete(id);
                     actionsExecuted.push(`✅ Бот ${id} остановлен`);
                     stopped = true;
                     
-                    console.log(`[Bot Manager] Stopped bot ${id}`);
+                    console.log(`[Bot Manager] ✅ Successfully stopped bot ${id}`);
+                    
                 } catch (error) {
-                    actionsExecuted.push(`❌ Ошибка остановки ${id}: ` + error.message);
+                    // Even if there's an error, try to remove from storage
+                    storage.runningBots.delete(id);
+                    actionsExecuted.push(`⚠️ Бот ${id} удален (с предупреждением: ${error.message})`);
                     console.error(`[Bot Manager] Error stopping ${id}:`, error);
+                    stopped = true;
                 }
             }
-        }
-        if (!stopped) {
-            actionsExecuted.push('❌ Бот с указанным токеном не найден');
         }
     }
 
