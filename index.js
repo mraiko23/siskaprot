@@ -8,7 +8,7 @@ const vm = require('vm');
 
 // ============ CONFIGURATION ============
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyCf-Hi6MtUyiDdYYkdSYAQP-GW0oFctn1Y';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyCNHdYWChRhOMpyEAGywutUsZVJh2LPfvc';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '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';
 const GITHUB_OWNER = process.env.GITHUB_OWNER || 'mraiko23';
 const GITHUB_REPO = process.env.GITHUB_REPO || 'doars';
