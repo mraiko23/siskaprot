@@ -75,6 +75,29 @@ const cache = {
     recentlyCreatedBots: new Map() // botName -> timestamp(ms) to prevent immediate accidental deletion
 };
 
+// Simple per-bot async lock helper to serialize operations on the same bot
+const botLocks = new Map();
+async function withBotLock(botName, fn) {
+    const key = String(botName).toLowerCase();
+    // If another operation holds the lock, wait until it's released
+    while (botLocks.has(key)) {
+        try {
+            await botLocks.get(key);
+        } catch (e) {
+            // ignore and re-check
+        }
+    }
+    let release;
+    const p = new Promise(resolve => { release = resolve; });
+    botLocks.set(key, p);
+    try {
+        return await fn();
+    } finally {
+        botLocks.delete(key);
+        try { release(); } catch (e) { /* ignore */ }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 🌐 GITHUB STORAGE SYSTEM - PRIMARY DATA STORAGE
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1309,18 +1332,21 @@ async function restoreBot(botName, token, code) {
         const script = new vm.Script(wrappedCode);
         await script.runInContext(context);
         
-        // Small delay to ensure bot starts polling
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Verify bot was registered
-        if (cache.runningBots.has(botName)) {
-            console.log(`[Bot] ✅ Restored and running: ${botName}`);
-            return true;
-        } else {
-            console.warn(`[Bot] ⚠️ Started but instance not captured: ${botName}`);
-            console.warn(`[Bot] Bot code must call setBotInstance(bot) or bot won't be stoppable`);
-            return true;
+        // Wait up to 5 seconds for the bot instance to register in cache.runningBots
+        const waitUntil = Date.now() + 5000;
+        while (Date.now() < waitUntil) {
+            if (cache.runningBots.has(botName)) {
+                console.log(`[Bot] ✅ Restored and running: ${botName}`);
+                return true;
+            }
+            // small delay
+            await new Promise(resolve => setTimeout(resolve, 200));
         }
+
+        console.warn(`[Bot] ⚠️ Started but instance not captured within timeout: ${botName}`);
+        console.warn(`[Bot] Bot code should call setBotInstance(bot) or bot won't be stoppable`);
+        // Do not claim success unless instance is registered
+        return false;
     } catch (error) {
         console.error(`[Bot] ❌ Failed to restore ${botName}:`, error.message);
         return false;
@@ -1956,32 +1982,37 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             const botToken = tokenMatch[1].trim();
             const botCode = codeMatch[1].trim();
             
-            if (processedActions.has(`create:${botName}`)) {
+            const normBotKey = String(botName).toLowerCase();
+            if (processedActions.has(`create:${normBotKey}`)) {
                 actionsExecuted.push(`⚠️ Пропущено повторное создание бота "${botName}" в одном ответе.`);
                 continue;
             }
-            processedActions.add(`create:${botName}`);
+            processedActions.add(`create:${normBotKey}`);
             
             try {
-                // Save bot to GitHub
-                const result = await dataManager.saveBot(botName, {
-                    token: botToken,
-                    code: botCode,
-                    enabled: true
-                });
-                
-                if (result.success) {
-                    // Start the bot
-                    const started = await restoreBot(botName, botToken, botCode);
-                    // Mark as recently created (protect from immediate accidental delete for 30s)
-                    try {
-                        cache.recentlyCreatedBots.set(botName, Date.now());
-                    } catch (e) { /* ignore */ }
+                // Serialize create operations for this bot to avoid races
+                await withBotLock(botName, async () => {
+                    // Save bot to GitHub
+                    const result = await dataManager.saveBot(botName, {
+                        token: botToken,
+                        code: botCode,
+                        enabled: true
+                    });
 
-                    actionsExecuted.push(`🎉 Бот "${botName}" создан и ${started ? 'запущен' : 'запущен (не удалось подтвердить)'}!\n✅ Сохранён на GitHub\n🔥 При перезапуске автоматически загрузится!`);
-                } else {
-                    actionsExecuted.push('❌ Ошибка сохранения бота: ' + result.error);
-                }
+                    if (result.success) {
+                        // Start the bot
+                        const started = await restoreBot(botName, botToken, botCode);
+                        // Mark as recently created (protect from immediate accidental delete)
+                        try {
+                            // Store normalized (lowercased) bot name to make checks case-insensitive
+                            cache.recentlyCreatedBots.set(String(botName).toLowerCase(), Date.now());
+                        } catch (e) { /* ignore */ }
+
+                        actionsExecuted.push(`🎉 Бот "${botName}" создан и ${started ? 'запущен' : 'запущен (не удалось подтвердить)'}!\n✅ Сохранён на GitHub\n🔥 При перезапуске автоматически загрузится!`);
+                    } else {
+                        actionsExecuted.push('❌ Ошибка сохранения бота: ' + result.error);
+                    }
+                });
             } catch (error) {
                 actionsExecuted.push('❌ Ошибка создания бота: ' + error.message);
             }
@@ -1994,101 +2025,124 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     const disableBotRegex = /<DISABLE_BOT>(.*?)<\/DISABLE_BOT>/g;
     while ((match = disableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
-        try {
-            if (processedActions.has(`disable:${botName}`)) {
-                actionsExecuted.push(`⚠️ Пропущено повторное отключение бота "${botName}" в одном ответе.`);
-                continue;
-            }
-            processedActions.add(`disable:${botName}`);
-            // Prevent immediate accidental disable if bot was just created
-            const createdAt = cache.recentlyCreatedBots.get(botName);
-            if (createdAt && (Date.now() - createdAt) < 30000) {
-                actionsExecuted.push(`⚠️ Бот "${botName}" недавно создан — отменяю немедленное отключение. Попробуйте ещё раз через несколько секунд.`);
-                // Clean up old entry after message
-                cache.recentlyCreatedBots.delete(botName);
-                continue;
-            }
+            try {
+                const normDisableKey = `disable:${String(botName).toLowerCase()}`;
+                if (processedActions.has(normDisableKey)) {
+                    actionsExecuted.push(`⚠️ Пропущено повторное отключение бота "${botName}" в одном ответе.`);
+                    continue;
+                }
+                processedActions.add(normDisableKey);
 
-            // First check if bot exists in GitHub
-            const botData = await dataManager.getBot(botName);
-            if (!botData) {
-                actionsExecuted.push(`❌ Бот "${botName}" не найден в GitHub данных`);
-                continue;
+                // Serialize disable operations for this bot
+                await withBotLock(botName, async () => {
+                    // Prevent immediate accidental disable if bot was just created
+                    const createdAt = cache.recentlyCreatedBots.get(String(botName).toLowerCase());
+                    if (createdAt && (Date.now() - createdAt) < 60000) {
+                        actionsExecuted.push(`⚠️ Бот "${botName}" недавно создан — отменяю немедленное отключение. Попробуйте ещё раз через несколько секунд.`);
+                        // Clean up old entry after message
+                        cache.recentlyCreatedBots.delete(String(botName).toLowerCase());
+                        return;
+                    }
+
+                    // First check if bot exists in GitHub
+                    const botData = await dataManager.getBot(botName);
+                    if (!botData) {
+                        actionsExecuted.push(`❌ Бот "${botName}" не найден в GitHub данных`);
+                        return;
+                    }
+
+                    // Stop the bot if it's running
+                    let stopResult = 'не запущен';
+                    if (cache.runningBots.has(botName)) {
+                        const stopped = await stopBot(botName);
+                        stopResult = stopped ? '✅ остановлен' : '⚠️ ошибка остановки';
+                    }
+
+                    // Disable in GitHub
+                    const result = await dataManager.disableBot(botName);
+                    if (result.success) {
+                        actionsExecuted.push(`⏸️ Бот "${botName}" ВЫКЛЮЧЕН (${stopResult})\n💾 Данные на GitHub\n🔄 Включить: "включи бота ${botName}"`);
+                    } else {
+                        actionsExecuted.push(`❌ Ошибка изменения статуса бота "${botName}"`);
+                    }
+                });
+            } catch (error) {
+                actionsExecuted.push(`❌ Ошибка отключения бота "${botName}": ${error.message}`);
             }
-            
-            // Stop the bot if it's running
-            let stopResult = 'не запущен';
-            if (cache.runningBots.has(botName)) {
-                const stopped = await stopBot(botName);
-                stopResult = stopped ? '✅ остановлен' : '⚠️ ошибка остановки';
-            }
-            
-            // Disable in GitHub
-            const result = await dataManager.disableBot(botName);
-            if (result.success) {
-                actionsExecuted.push(`⏸️ Бот "${botName}" ВЫКЛЮЧЕН (${stopResult})\n💾 Данные на GitHub\n🔄 Включить: "включи бота ${botName}"`);
-            } else {
-                actionsExecuted.push(`❌ Ошибка изменения статуса бота "${botName}"`);
-            }
-        } catch (error) {
-            actionsExecuted.push(`❌ Ошибка отключения бота "${botName}": ${error.message}`);
-        }
     }
 
     // 22. ENABLE_BOT - Enable bot
     const enableBotRegex = /<ENABLE_BOT>(.*?)<\/ENABLE_BOT>/g;
     while ((match = enableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
-        try {
-            if (processedActions.has(`enable:${botName}`)) {
-                actionsExecuted.push(`⚠️ Пропущено повторное включение бота "${botName}" в одном ответе.`);
-                continue;
-            }
-            processedActions.add(`enable:${botName}`);
-            const result = await dataManager.enableBot(botName);
-            if (result.success) {
-                const botData = await dataManager.getBot(botName);
-                if (botData) {
-                    await restoreBot(botName, botData.token, botData.code);
-                    actionsExecuted.push(`✅ Бот ${botName} включен обратно!`);
-                } else {
-                    actionsExecuted.push(`❌ Данные бота не найдены`);
+            try {
+                const normEnableKey = `enable:${String(botName).toLowerCase()}`;
+                if (processedActions.has(normEnableKey)) {
+                    actionsExecuted.push(`⚠️ Пропущено повторное включение бота "${botName}" в одном ответе.`);
+                    continue;
                 }
-            } else {
-                actionsExecuted.push(`❌ Бот ${botName} не найден`);
+                processedActions.add(normEnableKey);
+
+                // Serialize enable operations
+                await withBotLock(botName, async () => {
+                    const result = await dataManager.enableBot(botName);
+                    if (result.success) {
+                        const botData = await dataManager.getBot(botName);
+                        if (botData) {
+                            const restored = await restoreBot(botName, botData.token, botData.code);
+                            if (!restored) {
+                                // Rollback GitHub flag to disabled if restore failed
+                                try {
+                                    await dataManager.disableBot(botName);
+                                } catch (e) { /* ignore */ }
+                                actionsExecuted.push(`❌ Не удалось запустить бот ${botName} после включения. Статус откатан.`);
+                                return;
+                            }
+                            actionsExecuted.push(`✅ Бот ${botName} включен обратно!`);
+                        } else {
+                            actionsExecuted.push(`❌ Данные бота не найдены`);
+                        }
+                    } else {
+                        actionsExecuted.push(`❌ Бот ${botName} не найден`);
+                    }
+                });
+            } catch (error) {
+                actionsExecuted.push('❌ Ошибка включения бота: ' + error.message);
             }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка включения бота: ' + error.message);
-        }
     }
 
     // 23. DELETE_BOT - Delete bot permanently
     const deleteBotRegex = /<DELETE_BOT>(.*?)<\/DELETE_BOT>/g;
     while ((match = deleteBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
-        try {
-            if (processedActions.has(`delete:${botName}`)) {
-                actionsExecuted.push(`⚠️ Пропущено повторное удаление бота "${botName}" в одном ответе.`);
-                continue;
-            }
-            processedActions.add(`delete:${botName}`);
-            // Prevent immediate accidental delete if bot was just created
-            const createdAt = cache.recentlyCreatedBots.get(botName);
-            if (createdAt && (Date.now() - createdAt) < 30000) {
-                actionsExecuted.push(`⚠️ Бот "${botName}" недавно создан — отменяю немедленное удаление. Попробуйте ещё раз через несколько секунд.`);
-                cache.recentlyCreatedBots.delete(botName);
-                continue;
-            }
+            try {
+                const normDeleteKey = `delete:${String(botName).toLowerCase()}`;
+                if (processedActions.has(normDeleteKey)) {
+                    actionsExecuted.push(`⚠️ Пропущено повторное удаление бота "${botName}" в одном ответе.`);
+                    continue;
+                }
+                processedActions.add(normDeleteKey);
 
-            const success = await deleteBot(botName);
-            if (success) {
-                actionsExecuted.push(`✅ Бот ${botName} полностью удалён из GitHub`);
-            } else {
-                actionsExecuted.push(`❌ Бот ${botName} не найден`);
+                // Serialize delete operations
+                await withBotLock(botName, async () => {
+                    // Prevent immediate accidental delete if bot was just created
+                    const createdAt = cache.recentlyCreatedBots.get(String(botName).toLowerCase());
+                    if (createdAt && (Date.now() - createdAt) < 60000) {
+                        actionsExecuted.push(`⚠️ Бот "${botName}" недавно создан — отменяю немедленное удаление. Попробуйте ещё раз через несколько секунд.`);
+                        cache.recentlyCreatedBots.delete(String(botName).toLowerCase());
+                        return;
+                    }
+
+                    const success = await deleteBot(botName);
+                    if (success) {
+                        actionsExecuted.push(`✅ Бот ${botName} полностью удалён из GitHub`);
+                    } else {
+                        actionsExecuted.push(`❌ Бот ${botName} не найден`);
+                    }
+                });
+            } catch (error) {
+                actionsExecuted.push('❌ Ошибка удаления бота: ' + error.message);
             }
-        } catch (error) {
-            actionsExecuted.push('❌ Ошибка удаления бота: ' + error.message);
-        }
     }
 
     // 24. LIST_BOTS - List all bots
