@@ -237,6 +237,142 @@ class GitHubStorage {
 const githubStorage = new GitHubStorage(CONFIG.GITHUB_TOKEN, CONFIG.GITHUB_REPO);
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 💾 AUTO-SAVE & AUTO-LOAD SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+
+class PersistenceManager {
+    constructor(githubStorage) {
+        this.github = githubStorage;
+        this.autoSaveInterval = 60000; // Auto-save every 60 seconds
+        this.saveTimer = null;
+    }
+
+    async saveAllData() {
+        if (!this.github.enabled) {
+            console.log('[Persistence] GitHub not configured, skipping save');
+            return;
+        }
+
+        try {
+            console.log('[Persistence] 💾 Saving all data to GitHub...');
+
+            // Save commands
+            const commandsData = {};
+            for (const [name, handler] of storage.customCommands) {
+                commandsData[name] = handler.toString();
+            }
+            await this.github.saveFile('bot-data/commands.json', JSON.stringify(commandsData, null, 2), 'Auto-save commands');
+
+            // Save websites
+            const websitesData = {};
+            for (const [path, code] of storage.websites) {
+                websitesData[path] = code;
+            }
+            await this.github.saveFile('bot-data/websites.json', JSON.stringify(websitesData, null, 2), 'Auto-save websites');
+
+            // Save databases
+            const databasesData = {};
+            for (const [dbName, db] of storage.databases) {
+                databasesData[dbName] = Object.fromEntries(db);
+            }
+            await this.github.saveFile('bot-data/databases.json', JSON.stringify(databasesData, null, 2), 'Auto-save databases');
+
+            console.log('[Persistence] ✅ All data saved to GitHub!');
+            return { success: true };
+        } catch (error) {
+            console.error('[Persistence] ❌ Save error:', error.message);
+            return { success: false, error: error.message };
+        }
+    }
+
+    async loadAllData() {
+        if (!this.github.enabled) {
+            console.log('[Persistence] GitHub not configured, skipping load');
+            return;
+        }
+
+        try {
+            console.log('[Persistence] 📂 Loading data from GitHub...');
+
+            // Load commands
+            const commandsResult = await this.github.loadFile('bot-data/commands.json');
+            if (commandsResult.success) {
+                const commandsData = JSON.parse(commandsResult.content);
+                let count = 0;
+                for (const [name, funcString] of Object.entries(commandsData)) {
+                    try {
+                        // Recreate function from string
+                        const func = eval(`(${funcString})`);
+                        storage.customCommands.set(name, func);
+                        count++;
+                    } catch (e) {
+                        console.error(`[Persistence] Failed to restore command ${name}:`, e.message);
+                    }
+                }
+                console.log(`[Persistence] ✅ Loaded ${count} commands`);
+            }
+
+            // Load websites
+            const websitesResult = await this.github.loadFile('bot-data/websites.json');
+            if (websitesResult.success) {
+                const websitesData = JSON.parse(websitesResult.content);
+                let count = 0;
+                for (const [path, code] of Object.entries(websitesData)) {
+                    try {
+                        // Re-execute website code
+                        const sandbox = createSandbox(null);
+                        const context = vm.createContext(sandbox);
+                        const script = new vm.Script(code);
+                        script.runInContext(context);
+                        storage.websites.set(path, code);
+                        count++;
+                    } catch (e) {
+                        console.error(`[Persistence] Failed to restore website ${path}:`, e.message);
+                    }
+                }
+                console.log(`[Persistence] ✅ Loaded ${count} websites`);
+            }
+
+            // Load databases
+            const databasesResult = await this.github.loadFile('bot-data/databases.json');
+            if (databasesResult.success) {
+                const databasesData = JSON.parse(databasesResult.content);
+                let count = 0;
+                for (const [dbName, data] of Object.entries(databasesData)) {
+                    storage.databases.set(dbName, new Map(Object.entries(data)));
+                    count++;
+                }
+                console.log(`[Persistence] ✅ Loaded ${count} databases`);
+            }
+
+            console.log('[Persistence] 🎉 All data loaded from GitHub!');
+            return { success: true };
+        } catch (error) {
+            console.error('[Persistence] ❌ Load error:', error.message);
+            return { success: false, error: error.message };
+        }
+    }
+
+    startAutoSave() {
+        if (this.saveTimer) return;
+        console.log(`[Persistence] 🔄 Auto-save enabled (every ${this.autoSaveInterval / 1000}s)`);
+        this.saveTimer = setInterval(() => {
+            this.saveAllData();
+        }, this.autoSaveInterval);
+    }
+
+    stopAutoSave() {
+        if (this.saveTimer) {
+            clearInterval(this.saveTimer);
+            this.saveTimer = null;
+            console.log('[Persistence] 🛑 Auto-save disabled');
+        }
+    }
+}
+
+const persistenceManager = new PersistenceManager(githubStorage);
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 🔍 WEB SCRAPING & URL FETCHING
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -544,6 +680,18 @@ DB: имя_базы
 KEY: ключ
 </DB_GET>
 
+2️⃣0️⃣ ОСТАНОВИТЬ САЙТ:
+<STOP_WEBSITE>/путь</STOP_WEBSITE>
+
+2️⃣1️⃣ СПИСОК САЙТОВ:
+<LIST_WEBSITES></LIST_WEBSITES>
+
+2️⃣2️⃣ ЭКСПОРТИРОВАТЬ САЙТ:
+<EXPORT_WEBSITE>/путь</EXPORT_WEBSITE>
+
+2️⃣3️⃣ ЭКСПОРТИРОВАТЬ ВСЕ ДАННЫЕ:
+<EXPORT_ALL></EXPORT_ALL>
+
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                    🎯 ПРАВИЛА РАБОТЫ                                  ║
 ╚═══════════════════════════════════════════════════════════════════════╝
@@ -700,6 +848,8 @@ function addToHistory(userId, role, content) {
 function registerCommand(commandName, handler) {
     storage.customCommands.set(commandName, handler);
     console.log(`[✓] Command registered: /${commandName}`);
+    // Auto-save to GitHub
+    persistenceManager.saveAllData().catch(e => console.error('[Auto-save] Error:', e.message));
     return true;
 }
 
@@ -707,6 +857,8 @@ function deleteCommand(commandName) {
     if (storage.customCommands.has(commandName)) {
         storage.customCommands.delete(commandName);
         console.log(`[✓] Command deleted: /${commandName}`);
+        // Auto-save to GitHub
+        persistenceManager.saveAllData().catch(e => console.error('[Auto-save] Error:', e.message));
         return true;
     }
     return false;
@@ -806,10 +958,16 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     
     while ((match = codeActionRegex.exec(aiResponse)) !== null) {
         const code = match[1].trim();
+        console.log(`[CODE_ACTION] Executing code (${code.length} chars)...`);
+        console.log('[CODE_ACTION] Code preview:', code.substring(0, 200));
+        
         try {
-            await executeInSandbox(code, chatId);
+            const result = await executeInSandbox(code, chatId);
+            console.log('[CODE_ACTION] ✅ Success');
             actionsExecuted.push('✅ Команда добавлена успешно');
         } catch (error) {
+            console.error('[CODE_ACTION] ❌ Error:', error.message);
+            console.error('[CODE_ACTION] Stack:', error.stack);
             actionsExecuted.push('⚠️ Ошибка добавления команды: ' + error.message);
         }
     }
@@ -818,12 +976,26 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     const executeNowRegex = /<EXECUTE_NOW>([\s\S]*?)<\/EXECUTE_NOW>/g;
     while ((match = executeNowRegex.exec(aiResponse)) !== null) {
         const code = match[1].trim();
+        console.log(`[EXECUTE_NOW] Running code: ${code.substring(0, 100)}...`);
+        
         try {
             const result = await executeInSandbox(code, chatId);
-            if (result !== undefined) {
-                actionsExecuted.push(`📊 Результат: ${result}`);
+            console.log('[EXECUTE_NOW] Result:', result);
+            
+            if (result !== undefined && result !== null) {
+                // Convert result to readable string
+                let resultStr = result;
+                if (typeof result === 'object') {
+                    try {
+                        resultStr = JSON.stringify(result, null, 2);
+                    } catch (e) {
+                        resultStr = String(result);
+                    }
+                }
+                actionsExecuted.push(`📊 Результат: ${resultStr}`);
             }
         } catch (error) {
+            console.error('[EXECUTE_NOW] Error:', error.message);
             actionsExecuted.push('⚠️ Ошибка выполнения: ' + error.message);
         }
     }
@@ -956,7 +1128,105 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 9. SAVE_FILE - Save local file
+    // 9. STOP_WEBSITE - Stop and remove website
+    const stopWebsiteRegex = /<STOP_WEBSITE>(.*?)<\/STOP_WEBSITE>/g;
+    while ((match = stopWebsiteRegex.exec(aiResponse)) !== null) {
+        const routePath = match[1].trim();
+        if (storage.websites.has(routePath)) {
+            try {
+                // Remove Express route from stack
+                const pathToRemove = routePath;
+                if (app._router && app._router.stack) {
+                    app._router.stack = app._router.stack.filter(layer => {
+                        if (layer.route) {
+                            return layer.route.path !== pathToRemove;
+                        }
+                        return true;
+                    });
+                }
+                // Remove from storage
+                storage.websites.delete(routePath);
+                await persistenceManager.saveAllData();
+                actionsExecuted.push(`✅ Сайт ${routePath} остановлен и удален`);
+            } catch (error) {
+                actionsExecuted.push('❌ Ошибка остановки сайта: ' + error.message);
+            }
+        } else {
+            actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
+        }
+    }
+
+    // 10. LIST_WEBSITES - List all running websites
+    if (aiResponse.includes('<LIST_WEBSITES>')) {
+        if (storage.websites.size === 0) {
+            actionsExecuted.push('🌐 Нет запущенных сайтов');
+        } else {
+            let siteList = '🌐 Запущенные сайты:\n\n';
+            for (const [path] of storage.websites) {
+                siteList += `  http://localhost:${CONFIG.PORT}${path}\n`;
+            }
+            actionsExecuted.push(siteList);
+        }
+    }
+
+    // 11. EXPORT_WEBSITE - Export website code
+    const exportWebsiteRegex = /<EXPORT_WEBSITE>(.*?)<\/EXPORT_WEBSITE>/g;
+    while ((match = exportWebsiteRegex.exec(aiResponse)) !== null) {
+        const routePath = match[1].trim();
+        if (storage.websites.has(routePath)) {
+            const code = storage.websites.get(routePath);
+            const exportContent = `# Website Export: ${routePath}\n\nPath: http://localhost:${CONFIG.PORT}${routePath}\n\n## Code:\n\n\`\`\`javascript\n${code}\n\`\`\`\n`;
+            try {
+                await githubStorage.saveFile(
+                    `exports/website-${routePath.replace(/\//g, '-')}.md`,
+                    exportContent,
+                    `Export website ${routePath}`
+                );
+                actionsExecuted.push(`✅ Сайт ${routePath} экспортирован на GitHub`);
+            } catch (error) {
+                actionsExecuted.push('❌ Ошибка экспорта: ' + error.message);
+            }
+        } else {
+            actionsExecuted.push(`❌ Сайт ${routePath} не найден`);
+        }
+    }
+
+    // 12. EXPORT_ALL - Export all bot data
+    if (aiResponse.includes('<EXPORT_ALL>')) {
+        try {
+            let exportContent = '# Complete Bot Data Export\n\n';
+            exportContent += `Export Date: ${new Date().toISOString()}\n\n`;
+            
+            // Commands
+            exportContent += '## Commands\n\n';
+            for (const [name, handler] of storage.customCommands) {
+                exportContent += `### /${name}\n\n\`\`\`javascript\n${handler.toString()}\n\`\`\`\n\n`;
+            }
+            
+            // Websites
+            exportContent += '## Websites\n\n';
+            for (const [path, code] of storage.websites) {
+                exportContent += `### ${path}\n\nURL: http://localhost:${CONFIG.PORT}${path}\n\n\`\`\`javascript\n${code}\n\`\`\`\n\n`;
+            }
+            
+            // Databases
+            exportContent += '## Databases\n\n';
+            for (const [dbName, db] of storage.databases) {
+                exportContent += `### ${dbName}\n\n\`\`\`json\n${JSON.stringify(Object.fromEntries(db), null, 2)}\n\`\`\`\n\n`;
+            }
+            
+            await githubStorage.saveFile(
+                `exports/complete-export-${Date.now()}.md`,
+                exportContent,
+                'Complete bot data export'
+            );
+            actionsExecuted.push('✅ Все данные экспортированы на GitHub');
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка экспорта: ' + error.message);
+        }
+    }
+
+    // 13. SAVE_FILE - Save local file
     const saveFileRegex = /<SAVE_FILE>([\s\S]*?)<\/SAVE_FILE>/g;
     while ((match = saveFileRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
@@ -1215,7 +1485,24 @@ function splitMessage(text, maxLength = 4000) {
 }
 
 async function sendLongMessage(chatId, text) {
-    const chunks = splitMessage(text);
+    // Convert to string properly
+    let message = text;
+    if (typeof message !== 'string') {
+        if (message === null || message === undefined) {
+            return; // Don't send empty messages
+        }
+        if (typeof message === 'object') {
+            try {
+                message = JSON.stringify(message, null, 2);
+            } catch (e) {
+                message = String(message);
+            }
+        } else {
+            message = String(message);
+        }
+    }
+    
+    const chunks = splitMessage(message);
     for (let i = 0; i < chunks.length; i++) {
         try {
             await bot.sendMessage(chatId, chunks[i]);
@@ -1250,10 +1537,22 @@ bot.on('message', async (msg) => {
             try {
                 const handler = storage.customCommands.get(command);
                 const result = await handler(chatId, args.join(' '));
-                if (result) {
-                    await sendLongMessage(chatId, String(result));
+                if (result !== undefined && result !== null) {
+                    // Properly convert result to string
+                    let message = result;
+                    if (typeof message === 'object') {
+                        try {
+                            message = JSON.stringify(message, null, 2);
+                        } catch (e) {
+                            message = String(message);
+                        }
+                    } else {
+                        message = String(message);
+                    }
+                    await sendLongMessage(chatId, message);
                 }
             } catch (error) {
+                console.error('[Command Error]', error);
                 await bot.sendMessage(chatId, '❌ Ошибка выполнения команды: ' + error.message);
             }
             return;
@@ -1430,6 +1729,25 @@ function startServer(port = CONFIG.PORT) {
 }
 
 startServer();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🚀 INITIALIZATION - Load data from GitHub
+// ═══════════════════════════════════════════════════════════════════════════
+
+(async () => {
+    try {
+        console.log('🔄 Loading persisted data from GitHub...');
+        await persistenceManager.loadAllData();
+        console.log('✅ Data restoration complete!');
+        
+        // Start auto-save
+        persistenceManager.startAutoSave();
+        console.log('✅ Auto-save enabled!');
+    } catch (error) {
+        console.error('⚠️ Failed to load persisted data:', error.message);
+        console.log('📦 Starting with fresh state...');
+    }
+})();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 🛡️ ERROR HANDLING
