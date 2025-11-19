@@ -1012,7 +1012,14 @@ async function callOpenRouter(messages, imageUrl = null) {
 - Когда пользователь отправляет изображение, ты МОЖЕШЬ его видеть и анализировать
 - Детально описывай что видишь на изображении
 - Отвечай на вопросы об изображении
-- Если изображение с подписью - связывай подпись с содержимым`
+- Если изображение с подписью - связывай подпись с содержимым
+
+📁 ОБРАБОТКА ФАЙЛОВ И ДОКУМЕНТОВ:
+- Пользователь может отправлять текстовые файлы (.txt, .md, .json, .js, .py, .html, .css и др.)
+- Ты получаешь содержимое текстовых файлов и можешь его анализировать
+- Для бинарных файлов ты получаешь информацию о имени, размере и типе
+- Помогай пользователю с кодом из файлов, анализируй, исправляй, объясняй
+- Можешь сохранять содержимое файлов на GitHub или создавать команды из кода`
         };
 
         // Prepare messages array
@@ -1881,15 +1888,29 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
     while ((match = disableBotRegex.exec(aiResponse)) !== null) {
         const botName = match[1].trim();
         try {
-            await stopBot(botName);
+            // First check if bot exists in GitHub
+            const botData = await dataManager.getBot(botName);
+            if (!botData) {
+                actionsExecuted.push(`❌ Бот "${botName}" не найден в GitHub данных`);
+                continue;
+            }
+            
+            // Stop the bot if it's running
+            let stopResult = 'не запущен';
+            if (cache.runningBots.has(botName)) {
+                const stopped = await stopBot(botName);
+                stopResult = stopped ? '✅ остановлен' : '⚠️ ошибка остановки';
+            }
+            
+            // Disable in GitHub
             const result = await dataManager.disableBot(botName);
             if (result.success) {
-                actionsExecuted.push(`⏸️ Бот ${botName} выключен. Можно включить обратно.`);
+                actionsExecuted.push(`⏸️ Бот "${botName}" ВЫКЛЮЧЕН (${stopResult})\n💾 Данные на GitHub\n🔄 Включить: "включи бота ${botName}"`);
             } else {
-                actionsExecuted.push(`❌ Бот ${botName} не найден`);
+                actionsExecuted.push(`❌ Ошибка изменения статуса бота "${botName}"`);
             }
         } catch (error) {
-            actionsExecuted.push('❌ Ошибка отключения бота: ' + error.message);
+            actionsExecuted.push(`❌ Ошибка отключения бота "${botName}": ${error.message}`);
         }
     }
 
@@ -1940,14 +1961,28 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             if (bots.length === 0) {
                 actionsExecuted.push('🤖 Нет ботов (проверено на GitHub)');
             } else {
-                let botList = '🤖 Боты (загружено с GitHub):\n\n';
+                let botList = `🤖 **Боты на GitHub** (Всего: ${bots.length})\n\n`;
                 for (const botName of bots) {
                     const botData = botsData[botName];
                     const enabled = botData.enabled !== false;
-                    const status = enabled ? '✅ Включен' : '⏸️ Выключен';
-                    const running = cache.runningBots.has(botName) ? '🟢 Работает' : '🔴 Остановлен';
-                    botList += `  ${status} ${running}: ${botName}\n`;
+                    const running = cache.runningBots.has(botName);
+                    
+                    let statusEmoji;
+                    let statusText;
+                    if (enabled && running) {
+                        statusEmoji = '✅🟢';
+                        statusText = 'Включен и Работает';
+                    } else if (enabled && !running) {
+                        statusEmoji = '✅🔴';
+                        statusText = 'Включен, Но Остановлен';
+                    } else {
+                        statusEmoji = '⏸️🔴';
+                        statusText = 'ВЫКЛЮЧЕН';
+                    }
+                    
+                    botList += `${statusEmoji} **"${botName}"** - ${statusText}\n`;
                 }
+                botList += `\n💾 Данные хранятся на GitHub`;
                 actionsExecuted.push(botList);
             }
         } catch (error) {
@@ -2210,9 +2245,10 @@ async function sendLongMessage(chatId, text) {
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
-    const text = msg.text;
+    const text = msg.text || msg.caption || '';
     
-    if (!text) return;
+    // Skip if no text AND no photo AND no document
+    if (!text && !msg.photo && !msg.document) return;
     
     console.log(`[Message] User ${userId}: ${text.substring(0, 50)}...`);
     
@@ -2346,6 +2382,76 @@ bot.on('message', async (msg) => {
             } catch (imageError) {
                 console.error('[Image] ❌ Failed to process:', imageError.message);
                 await bot.sendMessage(chatId, '⚠️ Не удалось обработать изображение: ' + imageError.message);
+                return;
+            }
+        }
+        
+        // Handle documents/files
+        if (msg.document) {
+            try {
+                const document = msg.document;
+                const fileId = document.file_id;
+                const fileName = document.file_name;
+                const fileSize = document.file_size;
+                
+                console.log('[Document] Processing:', fileName, 'Size:', fileSize);
+                
+                // Get file path from Telegram
+                const file = await bot.getFile(fileId);
+                const filePath = file.file_path;
+                
+                // Download document from Telegram servers
+                const fileUrl = `https://api.telegram.org/file/bot${CONFIG.TELEGRAM_TOKEN}/${filePath}`;
+                console.log('[Document] Downloading from:', fileUrl);
+                
+                const docResponse = await axios.get(fileUrl, {
+                    responseType: 'arraybuffer'
+                });
+                
+                // Convert to base64
+                const base64Doc = Buffer.from(docResponse.data, 'binary').toString('base64');
+                const mimeType = document.mime_type || 'application/octet-stream';
+                
+                console.log('[Document] ✅ Downloaded successfully, size:', base64Doc.length, 'bytes');
+                
+                // Try to read text content if it's a text file
+                let fileContent = '';
+                if (mimeType.startsWith('text/') || 
+                    fileName.endsWith('.txt') || 
+                    fileName.endsWith('.md') || 
+                    fileName.endsWith('.json') || 
+                    fileName.endsWith('.js') || 
+                    fileName.endsWith('.py') || 
+                    fileName.endsWith('.html') || 
+                    fileName.endsWith('.css')) {
+                    try {
+                        fileContent = Buffer.from(docResponse.data).toString('utf-8');
+                        console.log('[Document] Text content extracted, length:', fileContent.length);
+                    } catch (e) {
+                        console.log('[Document] Could not extract text content');
+                    }
+                }
+                
+                // Build message for AI
+                if (fileContent) {
+                    // Text file - include content
+                    if (!text || text.trim() === '') {
+                        userMessage = `Пользователь отправил файл "${fileName}" (${fileSize} байт).\n\nСодержимое:\n\n${fileContent.substring(0, 10000)}`;
+                    } else {
+                        userMessage = `${text}\n\nФайл "${fileName}" (${fileSize} байт):\n\n${fileContent.substring(0, 10000)}`;
+                    }
+                } else {
+                    // Binary file - just describe it
+                    if (!text || text.trim() === '') {
+                        userMessage = `Пользователь отправил файл "${fileName}" (${fileSize} байт, тип: ${mimeType}). Что мне с ним сделать?`;
+                    } else {
+                        userMessage = `${text}\n\n[Приложен файл: "${fileName}", ${fileSize} байт, тип: ${mimeType}]`;
+                    }
+                }
+                
+            } catch (docError) {
+                console.error('[Document] ❌ Failed to process:', docError.message);
+                await bot.sendMessage(chatId, '⚠️ Не удалось обработать документ: ' + docError.message);
                 return;
             }
         }
