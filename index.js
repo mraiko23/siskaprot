@@ -873,21 +873,31 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                             console.log(`[Bot Manager] Stopping existing bot ${id} with same token`);
                             entry.stopped = true;
                             
-                            if (entry.bot.removeAllListeners) {
+                            if (entry.bot && entry.bot.removeAllListeners) {
                                 entry.bot.removeAllListeners();
                             }
                             
-                            if (entry.bot.stopPolling) {
-                                await entry.bot.stopPolling({ cancel: true });
-                            }
+                            try {
+                                if (entry.bot && entry.bot.stopPolling) {
+                                    await entry.bot.stopPolling({ cancel: true });
+                                }
+                            } catch (pe) { /* ignore */ }
                             
-                            if (entry.bot.close) {
-                                await entry.bot.close();
+                            try {
+                                if (entry.bot && entry.bot.close) {
+                                    await entry.bot.close();
+                                }
+                            } catch (ce) { /* ignore */ }
+                            
+                            // Nullify bot
+                            if (entry.bot) {
+                                entry.bot = null;
                             }
                             
                             storage.runningBots.delete(id);
                         } catch (e) {
                             console.error(`[Bot Manager] Error stopping old bot:`, e);
+                            storage.runningBots.delete(id); // Delete anyway
                         }
                     }
                 }
@@ -900,7 +910,26 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                 });
                 
                 const botId = `bot_${Date.now()}`;
-                storage.runningBots.set(botId, { bot: newBot, token, code });
+                const botEntry = { bot: newBot, token, code, stopped: false };
+                storage.runningBots.set(botId, botEntry);
+                
+                // Wrap bot to check stopped flag
+                const originalOn = newBot.on.bind(newBot);
+                newBot.on = function(event, handler) {
+                    return originalOn(event, async (...args) => {
+                        // Check if bot was stopped
+                        if (botEntry.stopped || !storage.runningBots.has(botId)) {
+                            console.log(`[Bot ${botId}] Ignoring event - bot is stopped`);
+                            return;
+                        }
+                        // Call original handler
+                        try {
+                            await handler(...args);
+                        } catch (err) {
+                            console.error(`[Bot ${botId}] Handler error:`, err);
+                        }
+                    });
+                };
                 
                 // Execute bot code
                 const sandbox = {
@@ -908,7 +937,9 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                     console,
                     require,
                     axios,
-                    TelegramBot
+                    TelegramBot,
+                    botId,
+                    storage
                 };
                 const context = vm.createContext(sandbox);
                 const script = new vm.Script(code);
@@ -973,9 +1004,29 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                         console.log(`[Bot Manager] Close warning for ${id}: ${closeError.message}`);
                     }
                     
+                    // Force stop by nullifying the bot object
+                    try {
+                        // Set a flag to reject all incoming updates
+                        if (entry.bot._polling) {
+                            entry.bot._polling.abort = true;
+                        }
+                        
+                        // Remove webhook if exists
+                        if (entry.bot._webHook) {
+                            entry.bot._webHook = null;
+                        }
+                        
+                        // Nullify bot reference
+                        entry.bot = null;
+                        
+                        console.log(`[Bot Manager] Nullified bot ${id}`);
+                    } catch (nullError) {
+                        console.log(`[Bot Manager] Nullify warning: ${nullError.message}`);
+                    }
+                    
                     // Always remove from storage (most important step)
                     storage.runningBots.delete(id);
-                    actionsExecuted.push(`✅ Бот ${id} остановлен`);
+                    actionsExecuted.push(`✅ Бот ${id} остановлен и удален`);
                     stopped = true;
                     
                     console.log(`[Bot Manager] ✅ Successfully stopped bot ${id}`);
