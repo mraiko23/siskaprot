@@ -396,6 +396,86 @@ class GitHubDataManager {
         return db ? db[key] : null;
     }
 
+    // ========== BOTS ==========
+    async saveBot(botName, botData) {
+        console.log(`[DataManager] 💾 Saving bot: ${botName}`);
+        const botsData = await this.getAllBots();
+        // Save bot with token, enabled flag, and code
+        botsData[botName] = {
+            token: botData.token,
+            code: botData.code,
+            enabled: botData.enabled !== false
+        };
+        const result = await this.github.saveFile(
+            'bot-data/bots.json', 
+            JSON.stringify(botsData, null, 2), 
+            `Add/update bot: ${botName}`
+        );
+        return result;
+    }
+
+    async deleteBot(botName) {
+        console.log(`[DataManager] 🗑️ Deleting bot: ${botName}`);
+        const botsData = await this.getAllBots();
+        delete botsData[botName];
+        const result = await this.github.saveFile(
+            'bot-data/bots.json', 
+            JSON.stringify(botsData, null, 2), 
+            `Delete bot: ${botName}`
+        );
+        return result;
+    }
+
+    async getBot(botName) {
+        const botsData = await this.getAllBots();
+        return botsData[botName] || null;
+    }
+
+    async getAllBots() {
+        const result = await this.github.loadFile('bot-data/bots.json');
+        if (result.success) {
+            return JSON.parse(result.content);
+        }
+        return {};
+    }
+
+    async disableBot(botName) {
+        console.log(`[DataManager] 🔌 Disabling bot: ${botName}`);
+        const botsData = await this.getAllBots();
+        if (botsData[botName]) {
+            botsData[botName].enabled = false;
+            const result = await this.github.saveFile(
+                'bot-data/bots.json', 
+                JSON.stringify(botsData, null, 2), 
+                `Disable bot: ${botName}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Bot not found' };
+    }
+
+    async enableBot(botName) {
+        console.log(`[DataManager] ✅ Enabling bot: ${botName}`);
+        const botsData = await this.getAllBots();
+        if (botsData[botName]) {
+            botsData[botName].enabled = true;
+            const result = await this.github.saveFile(
+                'bot-data/bots.json', 
+                JSON.stringify(botsData, null, 2), 
+                `Enable bot: ${botName}`
+            );
+            return result;
+        }
+        return { success: false, error: 'Bot not found' };
+    }
+
+    async isBotEnabled(botName) {
+        const botsData = await this.getAllBots();
+        const bot = botsData[botName];
+        if (!bot) return false;
+        return bot.enabled !== false;
+    }
+
     // ========== INITIALIZATION ==========
     async initializeStorage() {
         console.log('[DataManager] 📂 Initializing GitHub storage...');
@@ -404,7 +484,8 @@ class GitHubDataManager {
         const files = [
             { path: 'bot-data/commands.json', content: '{}' },
             { path: 'bot-data/websites.json', content: '{}' },
-            { path: 'bot-data/databases.json', content: '{}' }
+            { path: 'bot-data/databases.json', content: '{}' },
+            { path: 'bot-data/bots.json', content: '{}' }
         ];
 
         for (const file of files) {
@@ -463,6 +544,25 @@ class GitHubDataManager {
             }
         }
         console.log(`[DataManager] ✅ Loaded ${websiteCount} websites (${disabledCount} disabled)`);
+
+        // Load and restore bots
+        const botsData = await this.getAllBots();
+        let botCount = 0;
+        let disabledBotCount = 0;
+        for (const [botName, botData] of Object.entries(botsData)) {
+            try {
+                if (botData.enabled !== false) {
+                    await restoreBot(botName, botData.token, botData.code);
+                    botCount++;
+                } else {
+                    console.log(`[DataManager] ⏸️ Skipping disabled bot: ${botName}`);
+                    disabledBotCount++;
+                }
+            } catch (e) {
+                console.error(`[DataManager] Failed to restore bot ${botName}:`, e.message);
+            }
+        }
+        console.log(`[DataManager] ✅ Loaded ${botCount} bots (${disabledBotCount} disabled)`);
 
         console.log('[DataManager] 🎉 All data loaded from GitHub!');
     }
@@ -650,10 +750,17 @@ async function callOpenRouter(messages) {
 7. 🛠️ УПРАВЛЕНИЕ
    <LIST_COMMANDS> - список команд
    <DELETE_COMMAND>cmdname</DELETE_COMMAND> - УДАЛИТЬ команду (безвозвратно)
+   
    <LIST_WEBSITES> - список сайтов
-   <DISABLE_WEBSITE>/path</DISABLE_WEBSITE> - ВЫКЛЮЧИТЬ сайт (можно включить обратно)
+   <DISABLE_WEBSITE>/path</DISABLE_WEBSITE> - ВЫКЛЮЧИТЬ сайт (можно включить)
    <ENABLE_WEBSITE>/path</ENABLE_WEBSITE> - ВКЛЮЧИТЬ сайт обратно
-   <DELETE_WEBSITE>/path</DELETE_WEBSITE> - УДАЛИТЬ сайт полностью (безвозвратно)
+   <DELETE_WEBSITE>/path</DELETE_WEBSITE> - УДАЛИТЬ сайт (безвозвратно)
+   
+   <LIST_BOTS> - список ботов
+   <DISABLE_BOT>botname</DISABLE_BOT> - ВЫКЛЮЧИТЬ бота (можно включить)
+   <ENABLE_BOT>botname</ENABLE_BOT> - ВКЛЮЧИТЬ бота обратно
+   <DELETE_BOT>botname</DELETE_BOT> - УДАЛИТЬ бота (безвозвратно)
+   
    <EXPORT_ALL> - экспорт всех данных
 
 ⚠️ ВАЖНО: Различай действия!
@@ -661,11 +768,16 @@ async function callOpenRouter(messages) {
    - "Удали/убери навсегда/удалить полностью" = используй <DELETE_WEBSITE> (безвозвратно)
    - "Включи обратно/запусти снова/включи опять" = используй <ENABLE_WEBSITE>
 
-Примеры:
+Примеры управления сайтами:
    Пользователь: "выключи сайт /test" → <DISABLE_WEBSITE>/test</DISABLE_WEBSITE>
-   Пользователь: "вырубить бота на /api" → <DISABLE_WEBSITE>/api</DISABLE_WEBSITE>
-   Пользователь: "включи обратно /test" → <ENABLE_WEBSITE>/test</ENABLE_WEBSITE>
+   Пользователь: "включи обратно сайт /test" → <ENABLE_WEBSITE>/test</ENABLE_WEBSITE>
    Пользователь: "удали сайт /old навсегда" → <DELETE_WEBSITE>/old</DELETE_WEBSITE>
+
+Примеры управления ботами:
+   Пользователь: "выключи бота mybot" → <DISABLE_BOT>mybot</DISABLE_BOT>
+   Пользователь: "вырубить бота testbot" → <DISABLE_BOT>testbot</DISABLE_BOT>
+   Пользователь: "включи обратно бота mybot" → <ENABLE_BOT>mybot</ENABLE_BOT>
+   Пользователь: "удали бота oldbot" → <DELETE_BOT>oldbot</DELETE_BOT>
 
 🚫 НЕ СОЗДАВАЙ отдельные команды для включения/выключения - используй теги напрямую!
 
@@ -682,7 +794,13 @@ async function callOpenRouter(messages) {
 - Объясняй что при перезапуске всё загрузится с GitHub
 - Используй эмодзи для наглядности
 - Будь дружелюбным и помогай пользователю
-- Помни: локальной памяти нет, всё на GitHub!`
+- Помни: локальной памяти нет, всё на GitHub!
+
+⚠️ НЕ ИСПОЛЬЗУЙ ТЕГИ БЕЗ НЕОБХОДИМОСТИ:
+- При простых приветствиях (привет, здравствуй, hi) - просто поздоровайся
+- При вопросах о возможностях - расскажи о них БЕЗ тегов
+- Используй теги ТОЛЬКО когда пользователь явно просит что-то сделать
+- Не создавай базы данных, команды или сайты без явного запроса!`
         };
 
         const response = await axios.post(
@@ -826,6 +944,70 @@ async function deleteWebsite(routePath) {
             });
         }
         console.log(`[✓] Website deleted from GitHub: ${routePath}`);
+        return true;
+    }
+    return false;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 🤖 BOT MANAGEMENT
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function restoreBot(botName, token, code) {
+    try {
+        // Check if bot is enabled
+        const enabled = await dataManager.isBotEnabled(botName);
+        if (!enabled) {
+            console.log(`[Bot] Skipped (disabled): ${botName}`);
+            return false;
+        }
+        
+        // Execute bot code
+        const sandbox = createSandbox(null);
+        sandbox.botToken = token;
+        sandbox.botName = botName;
+        const context = vm.createContext(sandbox);
+        const script = new vm.Script(code);
+        const botInstance = script.runInContext(context);
+        
+        // Store bot instance
+        cache.runningBots.set(botName, botInstance);
+        console.log(`[Bot] Restored: ${botName}`);
+        return true;
+    } catch (error) {
+        console.error(`[Bot] Failed to restore ${botName}:`, error.message);
+        return false;
+    }
+}
+
+async function stopBot(botName) {
+    try {
+        if (cache.runningBots.has(botName)) {
+            const botInstance = cache.runningBots.get(botName);
+            // Try to stop polling if it's a Telegram bot
+            if (botInstance && botInstance.stopPolling) {
+                await botInstance.stopPolling();
+            }
+            cache.runningBots.delete(botName);
+            console.log(`[Bot] Stopped: ${botName}`);
+            return true;
+        }
+        return false;
+    } catch (error) {
+        console.error(`[Bot] Failed to stop ${botName}:`, error.message);
+        return false;
+    }
+}
+
+async function deleteBot(botName) {
+    // Stop bot first
+    await stopBot(botName);
+    
+    // Delete from GitHub
+    const result = await dataManager.deleteBot(botName);
+    
+    if (result.success) {
+        console.log(`[✓] Bot deleted from GitHub: ${botName}`);
         return true;
     }
     return false;
@@ -1142,7 +1324,86 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 12. LIST_WEBSITES - List all running websites
+    // 12. DISABLE_BOT - Disable bot
+    const disableBotRegex = /<DISABLE_BOT>(.*?)<\/DISABLE_BOT>/g;
+    while ((match = disableBotRegex.exec(aiResponse)) !== null) {
+        const botName = match[1].trim();
+        try {
+            await stopBot(botName);
+            const result = await dataManager.disableBot(botName);
+            if (result.success) {
+                actionsExecuted.push(`⏸️ Бот ${botName} выключен. Можно включить обратно.`);
+            } else {
+                actionsExecuted.push(`❌ Бот ${botName} не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка отключения бота: ' + error.message);
+        }
+    }
+
+    // 13. ENABLE_BOT - Enable bot
+    const enableBotRegex = /<ENABLE_BOT>(.*?)<\/ENABLE_BOT>/g;
+    while ((match = enableBotRegex.exec(aiResponse)) !== null) {
+        const botName = match[1].trim();
+        try {
+            const result = await dataManager.enableBot(botName);
+            if (result.success) {
+                const botData = await dataManager.getBot(botName);
+                if (botData) {
+                    await restoreBot(botName, botData.token, botData.code);
+                    actionsExecuted.push(`✅ Бот ${botName} включен обратно!`);
+                } else {
+                    actionsExecuted.push(`❌ Данные бота не найдены`);
+                }
+            } else {
+                actionsExecuted.push(`❌ Бот ${botName} не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка включения бота: ' + error.message);
+        }
+    }
+
+    // 14. DELETE_BOT - Delete bot permanently
+    const deleteBotRegex = /<DELETE_BOT>(.*?)<\/DELETE_BOT>/g;
+    while ((match = deleteBotRegex.exec(aiResponse)) !== null) {
+        const botName = match[1].trim();
+        try {
+            const success = await deleteBot(botName);
+            if (success) {
+                actionsExecuted.push(`✅ Бот ${botName} полностью удалён из GitHub`);
+            } else {
+                actionsExecuted.push(`❌ Бот ${botName} не найден`);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка удаления бота: ' + error.message);
+        }
+    }
+
+    // 15. LIST_BOTS - List all bots
+    if (aiResponse.includes('<LIST_BOTS>')) {
+        try {
+            const botsData = await dataManager.getAllBots();
+            const bots = Object.keys(botsData);
+            
+            if (bots.length === 0) {
+                actionsExecuted.push('🤖 Нет ботов (проверено на GitHub)');
+            } else {
+                let botList = '🤖 Боты (загружено с GitHub):\n\n';
+                for (const botName of bots) {
+                    const botData = botsData[botName];
+                    const enabled = botData.enabled !== false;
+                    const status = enabled ? '✅ Включен' : '⏸️ Выключен';
+                    const running = cache.runningBots.has(botName) ? '🟢 Работает' : '🔴 Остановлен';
+                    botList += `  ${status} ${running}: ${botName}\n`;
+                }
+                actionsExecuted.push(botList);
+            }
+        } catch (error) {
+            actionsExecuted.push('❌ Ошибка загрузки списка: ' + error.message);
+        }
+    }
+
+    // 16. LIST_WEBSITES - List all running websites
     if (aiResponse.includes('<LIST_WEBSITES>')) {
         try {
             const websitesData = await dataManager.getAllWebsites();
@@ -1510,7 +1771,14 @@ bot.on('message', async (msg) => {
         cleanResponse = cleanResponse.replace(/<GITHUB_LIST>.*?<\/GITHUB_LIST>/g, '');
         cleanResponse = cleanResponse.replace(/<HOST_WEBSITE>[\s\S]*?<\/HOST_WEBSITE>/g, '');
         cleanResponse = cleanResponse.replace(/<STOP_WEBSITE>.*?<\/STOP_WEBSITE>/g, '');
+        cleanResponse = cleanResponse.replace(/<DISABLE_WEBSITE>.*?<\/DISABLE_WEBSITE>/g, '');
+        cleanResponse = cleanResponse.replace(/<ENABLE_WEBSITE>.*?<\/ENABLE_WEBSITE>/g, '');
+        cleanResponse = cleanResponse.replace(/<DELETE_WEBSITE>.*?<\/DELETE_WEBSITE>/g, '');
         cleanResponse = cleanResponse.replace(/<LIST_WEBSITES>/g, '');
+        cleanResponse = cleanResponse.replace(/<DISABLE_BOT>.*?<\/DISABLE_BOT>/g, '');
+        cleanResponse = cleanResponse.replace(/<ENABLE_BOT>.*?<\/ENABLE_BOT>/g, '');
+        cleanResponse = cleanResponse.replace(/<DELETE_BOT>.*?<\/DELETE_BOT>/g, '');
+        cleanResponse = cleanResponse.replace(/<LIST_BOTS>/g, '');
         cleanResponse = cleanResponse.replace(/<EXPORT_ALL>/g, '');
         cleanResponse = cleanResponse.replace(/<NPM_INSTALL>.*?<\/NPM_INSTALL>/g, '');
         cleanResponse = cleanResponse.replace(/<DELETE_COMMAND>.*?<\/DELETE_COMMAND>/g, '');
