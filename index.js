@@ -7,7 +7,7 @@ const fs = require('fs');
 const vm = require('vm');
 
 // ============ CONFIGURATION ============
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8505230525:AAFatkRFpxVavNc98uucUQqiEzum2QTa_6Y';
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyCf-Hi6MtUyiDdYYkdSYAQP-GW0oFctn1Y';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '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';
 const GITHUB_OWNER = process.env.GITHUB_OWNER || 'mraiko23';
@@ -23,9 +23,9 @@ if (!TELEGRAM_TOKEN) {
 console.log('✅ Configuration loaded');
 console.log('🤖 Starting advanced AI bot with Gemini 2.5 Flash...');
 
-// Initialize Google Gemini AI
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+// Initialize Google Gemini AI (lazy loading)
+let model = null;
+console.log('✅ Gemini AI will be initialized on first use');
 
 // Initialize GitHub API
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
@@ -245,7 +245,37 @@ function addToHistory(userId, role, content) {
 
 async function callGemini(userMessage, userId) {
     try {
+        // Initialize model on first use
+        if (!model) {
+            const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+            // Try multiple models in order of preference
+            const modelsToTry = ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro'];
+            let lastError;
+            
+            for (const modelName of modelsToTry) {
+                try {
+                    model = genAI.getGenerativeModel({ model: modelName });
+                    console.log(`✅ Using model: ${modelName}`);
+                    break;
+                } catch (e) {
+                    lastError = e;
+                    console.warn(`⚠️ Model ${modelName} not available, trying next...`);
+                }
+            }
+            
+            if (!model) {
+                throw new Error('No Gemini models available. Please check your API key at https://ai.google.dev/');
+            }
+        }
+
         const history = getHistory(userId);
+        
+        // Add system context as first user message if history is empty
+        let fullMessage = userMessage;
+        if (history.length === 0) {
+            fullMessage = SYSTEM_PROMPT + '\n\nUser: ' + userMessage;
+        }
+
         const chat = model.startChat({
             history: history,
             generationConfig: {
@@ -255,12 +285,6 @@ async function callGemini(userMessage, userId) {
                 topK: 40
             }
         });
-
-        // Add system context as first user message if history is empty
-        let fullMessage = userMessage;
-        if (history.length === 0) {
-            fullMessage = SYSTEM_PROMPT + '\n\nUser: ' + userMessage;
-        }
 
         const result = await chat.sendMessage(fullMessage);
         const response = result.response.text();
@@ -694,4 +718,8 @@ app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`🔗 GitHub storage: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}`);
     console.log('🚀 Bot is ready! Full power mode activated!');
+console.log('');
+console.log('⚠️  IMPORTANT: Make sure to set your TELEGRAM_BOT_TOKEN in .env');
+console.log('💡 Tip: Get a new Gemini API key from https://ai.google.dev/');
+console.log('💡 Tip: Get a GitHub token from https://github.com/settings/tokens');
 });
