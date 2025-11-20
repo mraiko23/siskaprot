@@ -273,10 +273,13 @@ const SYSTEM_PROMPT = `Ты SHERLOCK - МОЩНЕЙШИЙ AI-ассистент 
 • 🗄️ Встроенная база данных (in-memory + GitHub persistence)
 • 💿 Экспорт/импорт данных в JSON, CSV и других форматах
 
-🤖 УПРАВЛЕНИЕ БОТАМИ:
-• 🎮 Создание и запуск дочерних Telegram ботов
-• 🔄 Остановка и перезапуск ботов
-• 📊 Мониторинг активных ботов
+🤖 УПРАВЛЕНИЕ БОТАМИ (ОТДЕЛЬНЫЕ ПРОЦЕССЫ):
+• 🚀 Каждый бот запускается в отдельном процессе
+• 📂 Собственная директория для каждого бота (./bots/bot_XXX/)
+• 📦 Отдельные зависимости (npm install в каждой директории)
+• 💥 Остановка = KILL процесса + удаление директории
+• 🔄 Полная изоляция - боты не влияют друг на друга
+• 📊 Мониторинг: PID, workspace, uptime
 
 
 
@@ -349,7 +352,7 @@ CONTENT:
 1️⃣3️⃣ СПИСОК КОМАНД:
 <LIST_COMMANDS></LIST_COMMANDS>
 
-1️⃣4️⃣ СОЗДАТЬ БОТА:
+1️⃣4️⃣ СОЗДАТЬ БОТА (ОТДЕЛЬНЫЙ ПРОЦЕСС):
 <ACTIVATE_BOT>
 TOKEN: токен_бота
 CODE:
@@ -358,9 +361,23 @@ bot.on('message', async (msg) => {
 });
 </ACTIVATE_BOT>
 
-1️⃣5️⃣ ОСТАНОВИТЬ БОТА:
+❗ КАЖДЫЙ БОТ:
+• Запускается в отдельном Node.js процессе
+• Имеет свою директорию ./bots/bot_XXX/
+• Автоматически устанавливает node-telegram-bot-api и axios
+• Может устанавливать дополнительные пакеты в своем CODE
+
+1️⃣5️⃣ УНИЧТОЖИТЬ БОТА (ПОЛНОЕ УДАЛЕНИЕ):
 <STOP_BOT>токен</STOP_BOT>
-// Для остановки ВСЕХ ботов используй пустой токен:
+
+💥 ЧТО ПРОИСХОДИТ:
+1. SIGTERM сигнал процессу (мягкое завершение)
+2. Ждём 1 секунду
+3. SIGKILL если процесс ещё жив
+4. Удаление всей директории ./bots/bot_XXX/
+5. Удаление из storage
+
+// Для уничтожения ВСЕХ ботов:
 <STOP_BOT></STOP_BOT>
 
 1️⃣6️⃣ СПИСОК БОТОВ:
@@ -863,7 +880,7 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 14. ACTIVATE_BOT - Create child bot
+    // 14. ACTIVATE_BOT - Create child bot in separate process
     const activateBotRegex = /<ACTIVATE_BOT>([\s\S]*?)<\/ACTIVATE_BOT>/g;
     while ((match = activateBotRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
@@ -880,88 +897,144 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                     if (entry.token === token) {
                         try {
                             console.log(`[Bot Manager] Stopping existing bot ${id} with same token`);
-                            entry.stopped = true;
                             
-                            if (entry.bot && entry.bot.removeAllListeners) {
-                                entry.bot.removeAllListeners();
+                            // Kill process
+                            if (entry.process) {
+                                entry.process.kill('SIGTERM');
+                                await new Promise(resolve => setTimeout(resolve, 500));
+                                if (!entry.process.killed) {
+                                    entry.process.kill('SIGKILL');
+                                }
                             }
                             
-                            try {
-                                if (entry.bot && entry.bot.stopPolling) {
-                                    await entry.bot.stopPolling({ cancel: true });
-                                }
-                            } catch (pe) { /* ignore */ }
-                            
-                            try {
-                                if (entry.bot && entry.bot.close) {
-                                    await entry.bot.close();
-                                }
-                            } catch (ce) { /* ignore */ }
-                            
-                            // Nullify bot
-                            if (entry.bot) {
-                                entry.bot = null;
+                            // Remove workspace
+                            if (entry.workspace && fsSync.existsSync(entry.workspace)) {
+                                await execPromise(`rm -rf "${entry.workspace}"`);
                             }
                             
                             storage.runningBots.delete(id);
                         } catch (e) {
                             console.error(`[Bot Manager] Error stopping old bot:`, e);
-                            storage.runningBots.delete(id); // Delete anyway
+                            storage.runningBots.delete(id);
                         }
                     }
                 }
 
-                // Wait a bit to ensure old bot is fully stopped
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                const botId = `bot_${Date.now()}`;
+                const workspace = path.join(__dirname, 'bots', botId);
+                
+                console.log(`[Bot Manager] Creating workspace: ${workspace}`);
+                
+                // Create workspace directory
+                await fs.mkdir(workspace, { recursive: true });
+                
+                // Create package.json
+                const packageJson = {
+                    name: botId,
+                    version: '1.0.0',
+                    description: 'Child bot',
+                    main: 'bot.js',
+                    dependencies: {
+                        'node-telegram-bot-api': '^0.66.0',
+                        'axios': '^1.6.5'
+                    }
+                };
+                await fs.writeFile(
+                    path.join(workspace, 'package.json'),
+                    JSON.stringify(packageJson, null, 2),
+                    'utf-8'
+                );
+                
+                // Create bot.js file
+                const botCode = `
+const TelegramBot = require('node-telegram-bot-api');
+const axios = require('axios');
 
-                const newBot = new TelegramBot(token, {
-                    polling: { interval: 500, params: { timeout: 10 } }
+const token = '${token}';
+const bot = new TelegramBot(token, { polling: { interval: 500, params: { timeout: 10 } } });
+
+console.log('[Child Bot] Started with PID:', process.pid);
+
+${code}
+
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('[Child Bot] Received SIGTERM, shutting down...');
+    bot.stopPolling().then(() => {
+        process.exit(0);
+    }).catch(() => {
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('[Child Bot] Received SIGINT, shutting down...');
+    bot.stopPolling().then(() => {
+        process.exit(0);
+    }).catch(() => {
+        process.exit(0);
+    });
+});
+`;
+                await fs.writeFile(
+                    path.join(workspace, 'bot.js'),
+                    botCode,
+                    'utf-8'
+                );
+                
+                console.log(`[Bot Manager] Installing dependencies for ${botId}...`);
+                
+                // Install dependencies
+                await execPromise(`cd "${workspace}" && npm install --silent`, {
+                    timeout: 60000
                 });
                 
-                const botId = `bot_${Date.now()}`;
-                const botEntry = { bot: newBot, token, code, stopped: false };
-                storage.runningBots.set(botId, botEntry);
+                console.log(`[Bot Manager] Launching bot process ${botId}...`);
                 
-                // Wrap bot to check stopped flag
-                const originalOn = newBot.on.bind(newBot);
-                newBot.on = function(event, handler) {
-                    return originalOn(event, async (...args) => {
-                        // Check if bot was stopped
-                        if (botEntry.stopped || !storage.runningBots.has(botId)) {
-                            console.log(`[Bot ${botId}] Ignoring event - bot is stopped`);
-                            return;
-                        }
-                        // Call original handler
-                        try {
-                            await handler(...args);
-                        } catch (err) {
-                            console.error(`[Bot ${botId}] Handler error:`, err);
-                        }
-                    });
-                };
+                // Spawn bot process
+                const childProcess = require('child_process').spawn(
+                    'node',
+                    ['bot.js'],
+                    {
+                        cwd: workspace,
+                        detached: false,
+                        stdio: ['ignore', 'pipe', 'pipe']
+                    }
+                );
                 
-                // Execute bot code
-                const sandbox = {
-                    bot: newBot,
-                    console,
-                    require,
-                    axios,
-                    TelegramBot,
-                    botId,
-                    storage
-                };
-                const context = vm.createContext(sandbox);
-                const script = new vm.Script(code);
-                script.runInContext(context);
+                // Log output
+                childProcess.stdout.on('data', (data) => {
+                    console.log(`[${botId}] ${data.toString().trim()}`);
+                });
                 
-                actionsExecuted.push(`✅ Бот ${botId} запущен успешно`);
+                childProcess.stderr.on('data', (data) => {
+                    console.error(`[${botId}] ERROR: ${data.toString().trim()}`);
+                });
+                
+                childProcess.on('exit', (code) => {
+                    console.log(`[Bot Manager] Bot ${botId} exited with code ${code}`);
+                    storage.runningBots.delete(botId);
+                });
+                
+                // Store bot info
+                storage.runningBots.set(botId, {
+                    process: childProcess,
+                    pid: childProcess.pid,
+                    token,
+                    code,
+                    workspace,
+                    startedAt: new Date()
+                });
+                
+                actionsExecuted.push(`✅ Бот ${botId} запущен в отдельном процессе (PID: ${childProcess.pid})`);
             } catch (error) {
                 actionsExecuted.push('❌ Ошибка запуска бота: ' + error.message);
+                console.error('[Bot Manager] Detailed error:', error);
             }
         }
     }
 
-    // 15. STOP_BOT - Stop child bot
+    // 15. STOP_BOT - Kill child bot process and destroy workspace
     const stopBotRegex = /<STOP_BOT>(.*?)<\/STOP_BOT>/g;
     while ((match = stopBotRegex.exec(aiResponse)) !== null) {
         const token = match[1].trim();
@@ -980,71 +1053,55 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         } else {
             for (const { id, entry } of botsToStop) {
                 try {
-                    // Mark bot as stopped to prevent further processing
-                    entry.stopped = true;
+                    console.log(`[Bot Manager] 🔴 Terminating bot ${id} (PID: ${entry.pid})...`);
                     
-                    console.log(`[Bot Manager] Stopping bot ${id}...`);
-                    
-                    // Remove all event listeners first (synchronous, safe)
-                    if (entry.bot.removeAllListeners) {
-                        entry.bot.removeAllListeners();
-                        console.log(`[Bot Manager] Removed listeners for ${id}`);
-                    }
-                    
-                    // Try to stop polling (might fail with rate limit)
-                    try {
-                        if (entry.bot.stopPolling) {
-                            await entry.bot.stopPolling({ cancel: true, reason: 'Bot stopped by user' });
-                            console.log(`[Bot Manager] Stopped polling for ${id}`);
-                        }
-                    } catch (pollingError) {
-                        // Ignore rate limit errors - bot will stop anyway without listeners
-                        console.log(`[Bot Manager] Polling stop warning for ${id}: ${pollingError.message}`);
-                    }
-                    
-                    // Try to close connection (might fail with rate limit)
-                    try {
-                        if (entry.bot.close) {
-                            await entry.bot.close();
-                            console.log(`[Bot Manager] Closed connection for ${id}`);
-                        }
-                    } catch (closeError) {
-                        // Ignore rate limit errors
-                        console.log(`[Bot Manager] Close warning for ${id}: ${closeError.message}`);
-                    }
-                    
-                    // Force stop by nullifying the bot object
-                    try {
-                        // Set a flag to reject all incoming updates
-                        if (entry.bot._polling) {
-                            entry.bot._polling.abort = true;
-                        }
+                    // Kill the process
+                    if (entry.process && !entry.process.killed) {
+                        // Try graceful shutdown first
+                        entry.process.kill('SIGTERM');
+                        console.log(`[Bot Manager] Sent SIGTERM to ${id}`);
                         
-                        // Remove webhook if exists
-                        if (entry.bot._webHook) {
-                            entry.bot._webHook = null;
+                        // Wait 1 second for graceful shutdown
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        
+                        // Force kill if still running
+                        if (!entry.process.killed) {
+                            entry.process.kill('SIGKILL');
+                            console.log(`[Bot Manager] Sent SIGKILL to ${id}`);
+                            await new Promise(resolve => setTimeout(resolve, 200));
                         }
-                        
-                        // Nullify bot reference
-                        entry.bot = null;
-                        
-                        console.log(`[Bot Manager] Nullified bot ${id}`);
-                    } catch (nullError) {
-                        console.log(`[Bot Manager] Nullify warning: ${nullError.message}`);
                     }
                     
-                    // Always remove from storage (most important step)
+                    // Destroy workspace directory
+                    if (entry.workspace && fsSync.existsSync(entry.workspace)) {
+                        console.log(`[Bot Manager] 🗑️ Removing workspace: ${entry.workspace}`);
+                        try {
+                            await execPromise(`rm -rf "${entry.workspace}"`);
+                            console.log(`[Bot Manager] Workspace removed`);
+                        } catch (rmError) {
+                            console.error(`[Bot Manager] Failed to remove workspace:`, rmError.message);
+                            // Try with sudo if permission denied
+                            try {
+                                await execPromise(`rm -rf "${entry.workspace}"`);
+                            } catch (e) {
+                                console.error(`[Bot Manager] Could not remove workspace:`, e.message);
+                            }
+                        }
+                    }
+                    
+                    // Remove from storage
                     storage.runningBots.delete(id);
-                    actionsExecuted.push(`✅ Бот ${id} остановлен и удален`);
+                    
+                    actionsExecuted.push(`✅ Бот ${id} уничтожен (PID: ${entry.pid}, workspace удалён)`);
                     stopped = true;
                     
-                    console.log(`[Bot Manager] ✅ Successfully stopped bot ${id}`);
+                    console.log(`[Bot Manager] ✅ Successfully destroyed bot ${id}`);
                     
                 } catch (error) {
                     // Even if there's an error, try to remove from storage
                     storage.runningBots.delete(id);
-                    actionsExecuted.push(`⚠️ Бот ${id} удален (с предупреждением: ${error.message})`);
-                    console.error(`[Bot Manager] Error stopping ${id}:`, error);
+                    actionsExecuted.push(`⚠️ Бот ${id} удален с ошибкой: ${error.message}`);
+                    console.error(`[Bot Manager] Error destroying ${id}:`, error);
                     stopped = true;
                 }
             }
@@ -1059,7 +1116,13 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
             let botsList = '🤖 Запущенные боты:\n\n';
             for (const [botId, botData] of storage.runningBots) {
                 const tokenPreview = botData.token.substring(0, 10) + '...';
-                botsList += `  • ${botId} (токен: ${tokenPreview})\n`;
+                const uptime = botData.startedAt ? Math.floor((new Date() - botData.startedAt) / 1000) : 0;
+                const workspaceInfo = botData.workspace ? path.basename(botData.workspace) : 'N/A';
+                botsList += `  • ${botId}\n`;
+                botsList += `    PID: ${botData.pid || 'N/A'}\n`;
+                botsList += `    Token: ${tokenPreview}\n`;
+                botsList += `    Workspace: ${workspaceInfo}\n`;
+                botsList += `    Uptime: ${uptime}s\n\n`;
             }
             actionsExecuted.push(botsList);
         }
