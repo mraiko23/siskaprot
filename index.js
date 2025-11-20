@@ -911,7 +911,19 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         if (pathMatch && codeMatch) {
             const routePath = pathMatch[1].trim();
             const port = portMatch ? parseInt(portMatch[1]) : 3000 + storage.runningWebsites.size + 1;
-            const routeCode = codeMatch[1].trim();
+            let routeCode = codeMatch[1].trim();
+            
+            // Clean up any remaining </CODE> or similar tags
+            routeCode = routeCode.replace(/<\/CODE>/gi, '');
+            routeCode = routeCode.replace(/<CODE>/gi, '');
+            
+            // Check if code looks like HTML (starts with <!DOCTYPE or <html)
+            const isHTML = /^\s*<!DOCTYPE|^\s*<html/i.test(routeCode);
+            
+            if (isHTML) {
+                // It's HTML content, need to serve it as static HTML
+                console.log('[Website Manager] Detected HTML content, creating static server');
+            }
             
             try {
                 // Stop any existing website with same path
@@ -964,7 +976,56 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
                 );
                 
                 // Create server.js file
-                const serverCode = `
+                let serverCode;
+                
+                if (isHTML) {
+                    // Create a simple static HTML server
+                    const escapedHTML = routeCode.replace(/`/g, '\\`').replace(/\${/g, '\\${');
+                    serverCode = `
+const express = require('express');
+const app = express();
+const port = ${port};
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+console.log('[Child Website] Starting HTML server on port:', port);
+
+const htmlContent = \`${escapedHTML}\`;
+
+app.get('${routePath}', (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(htmlContent);
+});
+
+app.get('${routePath}/*', (req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(htmlContent);
+});
+
+const server = app.listen(port, () => {
+    console.log('[Child Website] Running on http://localhost:' + port);
+    console.log('[Child Website] Serving HTML at ${routePath}');
+});
+
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('[Child Website] Received SIGTERM, shutting down...');
+    server.close(() => {
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('[Child Website] Received SIGINT, shutting down...');
+    server.close(() => {
+        process.exit(0);
+    });
+});
+`;
+                } else {
+                    // It's Express route code
+                    serverCode = `
 const express = require('express');
 const app = express();
 const port = ${port};
@@ -995,6 +1056,7 @@ process.on('SIGINT', () => {
     });
 });
 `;
+                }
                 await fs.writeFile(
                     path.join(workspace, 'server.js'),
                     serverCode,
@@ -1052,10 +1114,14 @@ process.on('SIGINT', () => {
                                   `http://localhost:${CONFIG.PORT}`;
                 const fullUrl = `${publicUrl}${routePath}`;
                 
-                actionsExecuted.push(`✅ Сайт ${websiteId} запущен в отдельном процессе (PID: ${childProcess.pid}, PORT: ${port})\n🌐 URL: ${fullUrl}`);
+                const websiteType = isHTML ? 'HTML' : 'Express routes';
+                actionsExecuted.push(`✅ Сайт ${websiteId} запущен (${websiteType}) в отдельном процессе (PID: ${childProcess.pid}, PORT: ${port})\n🌐 URL: ${fullUrl}`);
             } catch (error) {
                 actionsExecuted.push('❌ Ошибка запуска сайта: ' + error.message);
                 console.error('[Website Manager] Detailed error:', error);
+                console.error('[Website Manager] Route path:', routePath);
+                console.error('[Website Manager] Code length:', routeCode.length);
+                console.error('[Website Manager] Is HTML:', isHTML);
             }
         }
     }
