@@ -363,6 +363,38 @@ app.listen(port, () => console.log('Running on ' + port));
 8️⃣А️⃣ ОСТАНОВИТЬ САЙТ:
 <STOP_WEBSITE>site_id</STOP_WEBSITE>
 
+⚠️ ВАЖНО - КОНТЕКСТ РАЗГОВОРА (САЙТЫ):
+• Когда ты создаешь сайт - site_id сохраняется в контекст разговора
+• Когда ты показываешь список сайтов - первый site_id сохраняется в контекст
+• Если пользователь говорит "выключи его", "останови его", "выключи этот сайт", "сайт выключи":
+  1. ПОСМОТРИ в conversation history - есть ли site_id в предыдущих сообщениях?
+  2. Если ДА - используй STOP_WEBSITE с этим site_id
+  3. Если НЕТ - спроси какого именно сайта остановить
+• НИКОГДА не выключай все сайты если пользователь говорит о конкретном сайте!
+• Для остановки ВСЕХ сайтов пользователь должен явно сказать "останови все", "выключи все сайты"
+
+📝 ПРИМЕРЫ ПРАВИЛЬНОГО ИСПОЛЬЗОВАНИЯ (САЙТЫ):
+
+Пример 1:
+Пользователь: "Список сайтов"
+AI: <LIST_WEBSITES></LIST_WEBSITES> -> показывает site_1763648946138
+Пользователь: "сайт выключи"
+AI: <STOP_WEBSITE>site_1763648946138</STOP_WEBSITE> ✅ ПРАВИЛЬНО!
+
+Пример 2:
+Пользователь: "Создай сайт"
+AI: <HOST_WEBSITE>...</HOST_WEBSITE> -> создаёт site_1763649000000
+Пользователь: "останови его"
+AI: <STOP_WEBSITE>site_1763649000000</STOP_WEBSITE> ✅ ПРАВИЛЬНО!
+
+Пример 3:
+Пользователь: "92 он еще жив" (говорит о PID сайта)
+AI: ПОСМОТРЕТЬ в историю -> найти site_id с PID 92
+AI: <STOP_WEBSITE>site_XXX</STOP_WEBSITE> ✅ ПРАВИЛЬНО!
+
+// Для остановки ВСЕХ сайтов (ТОЛЬКО при явной команде "останови всех"):
+<STOP_WEBSITE>ALL</STOP_WEBSITE>
+
 8️⃣Б️⃣ СПИСОК САЙТОВ:
 <LIST_WEBSITES></LIST_WEBSITES>
 
@@ -1505,7 +1537,10 @@ process.on('SIGINT', () => {
             }
         } else {
             for (const [id, entry] of storage.runningWebsites) {
-                if (id === identifier || entry.path === identifier || String(entry.port) === identifier) {
+                if (id === identifier || 
+                    entry.path === identifier || 
+                    String(entry.port) === identifier ||
+                    String(entry.pid) === identifier) {
                     sitesToStop.push({ id, entry });
                 }
             }
