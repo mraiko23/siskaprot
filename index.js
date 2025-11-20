@@ -368,6 +368,36 @@ bot.on('message', async (msg) => {
 • Автоматически устанавливает node-telegram-bot-api и axios
 • Может устанавливать дополнительные пакеты в своем CODE
 
+⚠️ КРИТИЧЕСКИ ВАЖНО - CODE ФОРМАТ:
+• В CODE НЕ писать require('node-telegram-bot-api') - УЖЕ ЕСТЬ!
+• В CODE НЕ писать require('axios') - УЖЕ ЕСТЬ!
+• В CODE НЕ писать const token = '...' - УЖЕ ЕСТЬ!
+• В CODE НЕ писать const bot = new TelegramBot(...) - УЖЕ ЕСТЬ!
+• В CODE писать ТОЛЬКО bot.on(), bot.sendMessage() и твою логику!
+
+❌ НЕПРАВИЛЬНО (дубликат объявлений!):
+CODE:
+const TelegramBot = require('node-telegram-bot-api');  ❌ УЖЕ ЕСТЬ!
+const bot = new TelegramBot(token, ...)  ❌ УЖЕ ЕСТЬ!
+bot.on('message', ...)  ✅ ОК
+
+✅ ПРАВИЛЬНО (только логика):
+CODE:
+bot.on('message', async (msg) => {  ✅ ОК
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId, 'Привет!');
+});
+
+📦 ШАБЛОН БОТА (автоматически добавляется):
+const TelegramBot = require('node-telegram-bot-api');
+const axios = require('axios');
+const token = 'твой_токен';
+const bot = new TelegramBot(token, { polling: true });
+
+// СЮДА ВСТАВЛЯЕТСЯ ТВОЙ CODE 👆
+
+// Грейсфул шатдаун - автоматически
+
 1️⃣5️⃣ УНИЧТОЖИТЬ БОТА (ПОЛНОЕ УДАЛЕНИЕ):
 <STOP_BOT>токен_или_bot_id</STOP_BOT>
 
