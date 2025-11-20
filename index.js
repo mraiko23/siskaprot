@@ -69,7 +69,8 @@ const storage = {
     runningBots: new Map(),
     databases: new Map(),
     websites: new Map(),
-    files: new Map()
+    files: new Map(),
+    lastMentionedBot: new Map() // Track last bot mentioned per user
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -368,7 +369,7 @@ bot.on('message', async (msg) => {
 • Может устанавливать дополнительные пакеты в своем CODE
 
 1️⃣5️⃣ УНИЧТОЖИТЬ БОТА (ПОЛНОЕ УДАЛЕНИЕ):
-<STOP_BOT>токен</STOP_BOT>
+<STOP_BOT>токен_или_bot_id</STOP_BOT>
 
 💥 ЧТО ПРОИСХОДИТ:
 1. SIGTERM сигнал процессу (мягкое завершение)
@@ -377,8 +378,39 @@ bot.on('message', async (msg) => {
 4. Удаление всей директории ./bots/bot_XXX/
 5. Удаление из storage
 
-// Для уничтожения ВСЕХ ботов:
-<STOP_BOT></STOP_BOT>
+⚠️ ВАЖНО - КОНТЕКСТ РАЗГОВОРА:
+• Когда ты создаешь бота - bot_id сохраняется в контекст разговора
+• Когда ты показываешь список ботов - первый bot_id сохраняется в контекст
+• Если пользователь говорит "выключи его", "останови его", "выключи этого бота":
+  1. ПОСМОТРИ в conversation history - есть ли bot_id в предыдущих сообщениях?
+  2. Если ДА - используй STOP_BOT с этим bot_id
+  3. Если НЕТ - спроси какого именно бота остановить
+• НИКОГДА не выключай всех ботов если пользователь говорит о конкретном боте!
+• Для уничтожения ВСЕХ ботов пользователь должен явно сказать "останови всех", "выключи всех ботов"
+
+📝 ПРИМЕРЫ ПРАВИЛЬНОГО ИСПОЛЬЗОВАНИЯ:
+
+Пример 1:
+Пользователь: "Сколько ботов?"
+AI: <LIST_BOTS></LIST_BOTS> -> показывает bot_1763567890123
+Пользователь: "выключи его"
+AI: <STOP_BOT>bot_1763567890123</STOP_BOT> ✅ ПРАВИЛЬНО!
+
+Пример 2:
+Пользователь: "Создай бота"
+AI: <ACTIVATE_BOT>...</ACTIVATE_BOT> -> создаёт bot_1763568000000
+Пользователь: "останови его"
+AI: <STOP_BOT>bot_1763568000000</STOP_BOT> ✅ ПРАВИЛЬНО!
+
+Пример 3 (НЕПРАВИЛЬНО!):
+Пользователь: "Сколько ботов?"
+AI: показывает 3 бота
+Пользователь: "выключи его"
+AI: <STOP_BOT>ALL</STOP_BOT> ❌ НЕПРАВИЛЬНО! Выключил всех!
+ПРАВИЛЬНО: <STOP_BOT>bot_1763567890123</STOP_BOT> (первый из списка)
+
+// Для уничтожения ВСЕХ ботов (ТОЛЬКО при явной команде "останови всех"):
+<STOP_BOT>ALL</STOP_BOT>
 
 1️⃣6️⃣ СПИСОК БОТОВ:
 <LIST_BOTS></LIST_BOTS>
@@ -411,12 +443,22 @@ KEY: ключ
 • Конкатенация строк через + (НЕ template literals в тегах!)
 • Проверяй синтаксис перед отправкой
 • Будь максимально полезным и креативным
-• если пользователь просит перезагрузить Бота или тебе надо это сделать для загрузки обновления в Бота и других случаев, но на токене Бота уже запущена прошлая версия Бота, то сначало отключаешь прошлую версию Бота bot_2646 и после запускаешь новую bot_18274.
-главное что бы небылом подобных случаев:
-Бот bot_1763616345748 запущен успешно
 
- Бот bot_1763616345748 остановлен и удален
-то есть после запуска сразу остановка, что не должно быть 
+⚠️ КРИТИЧЕСКИ ВАЖНО - СОЗДАНИЕ БОТОВ:
+• После создания бота НИКОГДА не останавливай его сразу!
+• Бот должен продолжать работать после создания
+• Останавливай бота ТОЛЬКО если пользователь явно попросил
+• Система АВТОМАТИЧЕСКИ остановит старого бота с тем же токеном перед созданием нового
+• НЕ останавливай бота который только что создал!
+
+❌ НЕПРАВИЛЬНО:
+  Создаю бота... ✅
+  Останавливаю бота... ❌ ЗАЧЕМ?!
+
+✅ ПРАВИЛЬНО:
+  Создаю бота... ✅
+  Бот работает! ✅
+  (не останавливать без явной команды) 
 
 ❌ НИКОГДА:
 • НЕ используй русские названия переменных
@@ -1026,6 +1068,11 @@ process.on('SIGINT', () => {
                     startedAt: new Date()
                 });
                 
+                // Save to context (most recently created bot)
+                if (chatId) {
+                    storage.lastMentionedBot.set(chatId, botId);
+                }
+                
                 actionsExecuted.push(`✅ Бот ${botId} запущен в отдельном процессе (PID: ${childProcess.pid})`);
             } catch (error) {
                 actionsExecuted.push('❌ Ошибка запуска бота: ' + error.message);
@@ -1037,14 +1084,38 @@ process.on('SIGINT', () => {
     // 15. STOP_BOT - Kill child bot process and destroy workspace
     const stopBotRegex = /<STOP_BOT>(.*?)<\/STOP_BOT>/g;
     while ((match = stopBotRegex.exec(aiResponse)) !== null) {
-        const token = match[1].trim();
+        let token = match[1].trim();
         let stopped = false;
+        
+        // Handle "ALL" keyword for stopping all bots
+        if (token.toUpperCase() === 'ALL') {
+            token = ''; // Empty means all bots
+        }
         
         // Collect bots to stop
         const botsToStop = [];
-        for (const [id, entry] of storage.runningBots) {
-            if (!token || token === '' || entry.token === token || entry.token.includes(token.substring(0, 10))) {
-                botsToStop.push({ id, entry });
+        
+        if (!token || token === '') {
+            // No token provided - check if we should use context or stop all
+            // If user explicitly said ALL, stop all. Otherwise, it's an error.
+            if (match[1].trim().toUpperCase() === 'ALL') {
+                // Stop all bots
+                for (const [id, entry] of storage.runningBots) {
+                    botsToStop.push({ id, entry });
+                }
+            } else {
+                // Token is empty but NOT "ALL" - this is likely a contextual reference
+                // This shouldn't happen because AI should use context and provide bot ID
+                actionsExecuted.push('⚠️ Укажите конкретного бота для остановки (токен или bot_id)');
+                continue;
+            }
+        } else {
+            // Token provided - find matching bot(s)
+            for (const [id, entry] of storage.runningBots) {
+                // Match by: exact bot ID, exact token, or token prefix
+                if (id === token || entry.token === token || entry.token.includes(token.substring(0, 10))) {
+                    botsToStop.push({ id, entry });
+                }
             }
         }
         
@@ -1114,7 +1185,10 @@ process.on('SIGINT', () => {
             actionsExecuted.push('📝 Нет запущенных дочерних ботов');
         } else {
             let botsList = '🤖 Запущенные боты:\n\n';
+            let firstBotId = null;
             for (const [botId, botData] of storage.runningBots) {
+                if (!firstBotId) firstBotId = botId; // Save first bot for context
+                
                 const tokenPreview = botData.token.substring(0, 10) + '...';
                 const uptime = botData.startedAt ? Math.floor((new Date() - botData.startedAt) / 1000) : 0;
                 const workspaceInfo = botData.workspace ? path.basename(botData.workspace) : 'N/A';
@@ -1124,6 +1198,12 @@ process.on('SIGINT', () => {
                 botsList += `    Workspace: ${workspaceInfo}\n`;
                 botsList += `    Uptime: ${uptime}s\n\n`;
             }
+            
+            // Save first bot to context (most recently mentioned)
+            if (firstBotId && chatId) {
+                storage.lastMentionedBot.set(chatId, firstBotId);
+            }
+            
             actionsExecuted.push(botsList);
         }
     }
@@ -1187,6 +1267,11 @@ process.on('SIGINT', () => {
     }
 
     return actionsExecuted;
+}
+
+// Helper function: Get conversation context for bot operations
+function getContextualBotId(chatId) {
+    return storage.lastMentionedBot.get(chatId) || null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
