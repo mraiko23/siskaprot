@@ -941,7 +941,11 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         const codeMatch = content.match(/CODE:\s*([\s\S]+)/);
         
         if (pathMatch && codeMatch) {
-            const routePath = pathMatch[1].trim();
+            let routePath = pathMatch[1].trim();
+            // Ensure path starts with /
+            if (!routePath.startsWith('/')) {
+                routePath = '/' + routePath;
+            }
             const port = portMatch ? parseInt(portMatch[1]) : 3000 + storage.runningWebsites.size + 1;
             let routeCode = codeMatch[1].trim();
             
