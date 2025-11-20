@@ -67,10 +67,12 @@ const storage = {
     customCommands: new Map(),
     customFunctions: new Map(),
     runningBots: new Map(),
+    runningWebsites: new Map(), // Running website processes
     databases: new Map(),
-    websites: new Map(),
+    websites: new Map(), // Legacy - will be deprecated
     files: new Map(),
-    lastMentionedBot: new Map() // Track last bot mentioned per user
+    lastMentionedBot: new Map(), // Track last bot mentioned per user
+    lastMentionedWebsite: new Map() // Track last website mentioned per user
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -325,14 +327,44 @@ CONTENT:
 7️⃣ СПИСОК ФАЙЛОВ В GITHUB:
 <GITHUB_LIST>папка</GITHUB_LIST>
 
-8️⃣ СОЗДАТЬ ВЕБ-САЙТ:
+8️⃣ СОЗДАТЬ ВЕБ-САЙТ (ОТДЕЛЬНЫЙ ПРОЦЕСС):
 <HOST_WEBSITE>
 PATH: /mysite
+PORT: 3001 (опционально)
 CODE:
 app.get('/mysite', (req, res) => {
   res.send('<h1>Hello World!</h1>');
 });
 </HOST_WEBSITE>
+
+❗ КАЖДЫЙ САЙТ:
+• Запускается в отдельном Node.js процессе
+• Имеет свою директорию ./websites/site_XXX/
+• Свой порт (3001, 3002, ...)
+• Автоматически устанавливает express
+
+⚠️ КРИТИЧЕСКИ ВАЖНО - CODE ФОРМАТ:
+• В CODE НЕ писать require('express') - УЖЕ ЕСТЬ!
+• В CODE НЕ писать const app = express() - УЖЕ ЕСТЬ!
+• В CODE НЕ писать app.listen(...) - УЖЕ ЕСТЬ!
+• В CODE писать ТОЛЬКО app.get(), app.post() и роуты!
+
+📦 ШАБЛОН САЙТА (автоматически добавляется):
+const express = require('express');
+const app = express();
+const port = 3001;
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// СЮДА ВСТАВЛЯЕТСЯ ТВОЙ CODE 👆
+
+app.listen(port, () => console.log('Running on ' + port));
+
+8️⃣А️⃣ ОСТАНОВИТЬ САЙТ:
+<STOP_WEBSITE>site_id</STOP_WEBSITE>
+
+8️⃣Б️⃣ СПИСОК САЙТОВ:
+<LIST_WEBSITES></LIST_WEBSITES>
 
 9️⃣ СОХРАНИТЬ ЛОКАЛЬНЫЙ ФАЙЛ:
 <SAVE_FILE>
@@ -474,20 +506,27 @@ KEY: ключ
 • Проверяй синтаксис перед отправкой
 • Будь максимально полезным и креативным
 
-⚠️ КРИТИЧЕСКИ ВАЖНО - СОЗДАНИЕ БОТОВ:
-• После создания бота НИКОГДА не останавливай его сразу!
-• Бот должен продолжать работать после создания
-• Останавливай бота ТОЛЬКО если пользователь явно попросил
-• Система АВТОМАТИЧЕСКИ остановит старого бота с тем же токеном перед созданием нового
-• НЕ останавливай бота который только что создал!
+⚠️ КРИТИЧЕСКИ ВАЖНО - СОЗДАНИЕ БОТОВ И САЙТОВ:
+• После создания бота/сайта НИКОГДА не останавливай его сразу!
+• Бот/сайт должен продолжать работать после создания
+• Останавливай ТОЛЬКО если пользователь явно попросил
+• Система АВТОМАТИЧЕСКИ остановит старого перед созданием нового
+• НЕ останавливай то, что только что создал!
 
 ❌ НЕПРАВИЛЬНО:
   Создаю бота... ✅
   Останавливаю бота... ❌ ЗАЧЕМ?!
+  
+  Создаю сайт... ✅
+  Останавливаю сайт... ❌ ЗАЧЕМ?!
 
 ✅ ПРАВИЛЬНО:
   Создаю бота... ✅
   Бот работает! ✅
+  
+  Создаю сайт... ✅
+  Сайт работает! ✅
+  
   (не останавливать без явной команды) 
 
 ❌ НИКОГДА:
@@ -861,22 +900,156 @@ async function parseAndExecuteActions(aiResponse, chatId, userId) {
         }
     }
 
-    // 8. HOST_WEBSITE - Host a website
+    // 8. HOST_WEBSITE - Host a website in separate process
     const hostWebsiteRegex = /<HOST_WEBSITE>([\s\S]*?)<\/HOST_WEBSITE>/g;
     while ((match = hostWebsiteRegex.exec(aiResponse)) !== null) {
         const content = match[1].trim();
         const pathMatch = content.match(/PATH:\s*([^\n]+)/);
+        const portMatch = content.match(/PORT:\s*(\d+)/);
         const codeMatch = content.match(/CODE:\s*([\s\S]+)/);
         
         if (pathMatch && codeMatch) {
             const routePath = pathMatch[1].trim();
+            const port = portMatch ? parseInt(portMatch[1]) : 3000 + storage.runningWebsites.size + 1;
             const routeCode = codeMatch[1].trim();
+            
             try {
-                await executeInSandbox(routeCode, chatId);
-                storage.websites.set(routePath, routeCode);
-                actionsExecuted.push(`🌐 Сайт запущен на: http://localhost:${CONFIG.PORT}${routePath}`);
+                // Stop any existing website with same path
+                for (const [id, entry] of storage.runningWebsites) {
+                    if (entry.path === routePath) {
+                        try {
+                            console.log(`[Website Manager] Stopping existing website ${id} with same path`);
+                            
+                            if (entry.process) {
+                                entry.process.kill('SIGTERM');
+                                await new Promise(resolve => setTimeout(resolve, 500));
+                                if (!entry.process.killed) {
+                                    entry.process.kill('SIGKILL');
+                                }
+                            }
+                            
+                            if (entry.workspace && fsSync.existsSync(entry.workspace)) {
+                                await execPromise(`rm -rf "${entry.workspace}"`);
+                            }
+                            
+                            storage.runningWebsites.delete(id);
+                        } catch (e) {
+                            console.error(`[Website Manager] Error stopping old website:`, e);
+                            storage.runningWebsites.delete(id);
+                        }
+                    }
+                }
+
+                const websiteId = `site_${Date.now()}`;
+                const workspace = path.join(__dirname, 'websites', websiteId);
+                
+                console.log(`[Website Manager] Creating workspace: ${workspace}`);
+                
+                await fs.mkdir(workspace, { recursive: true });
+                
+                // Create package.json
+                const packageJson = {
+                    name: websiteId,
+                    version: '1.0.0',
+                    description: 'Child website',
+                    main: 'server.js',
+                    dependencies: {
+                        'express': '^4.18.2'
+                    }
+                };
+                await fs.writeFile(
+                    path.join(workspace, 'package.json'),
+                    JSON.stringify(packageJson, null, 2),
+                    'utf-8'
+                );
+                
+                // Create server.js file
+                const serverCode = `
+const express = require('express');
+const app = express();
+const port = ${port};
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+console.log('[Child Website] Starting on port:', port);
+
+${routeCode}
+
+const server = app.listen(port, () => {
+    console.log('[Child Website] Running on http://localhost:' + port);
+});
+
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('[Child Website] Received SIGTERM, shutting down...');
+    server.close(() => {
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('[Child Website] Received SIGINT, shutting down...');
+    server.close(() => {
+        process.exit(0);
+    });
+});
+`;
+                await fs.writeFile(
+                    path.join(workspace, 'server.js'),
+                    serverCode,
+                    'utf-8'
+                );
+                
+                console.log(`[Website Manager] Installing dependencies for ${websiteId}...`);
+                
+                await execPromise(`cd "${workspace}" && npm install --silent`, {
+                    timeout: 60000
+                });
+                
+                console.log(`[Website Manager] Launching website process ${websiteId}...`);
+                
+                const childProcess = require('child_process').spawn(
+                    'node',
+                    ['server.js'],
+                    {
+                        cwd: workspace,
+                        detached: false,
+                        stdio: ['ignore', 'pipe', 'pipe']
+                    }
+                );
+                
+                childProcess.stdout.on('data', (data) => {
+                    console.log(`[${websiteId}] ${data.toString().trim()}`);
+                });
+                
+                childProcess.stderr.on('data', (data) => {
+                    console.error(`[${websiteId}] ERROR: ${data.toString().trim()}`);
+                });
+                
+                childProcess.on('exit', (code) => {
+                    console.log(`[Website Manager] Website ${websiteId} exited with code ${code}`);
+                    storage.runningWebsites.delete(websiteId);
+                });
+                
+                storage.runningWebsites.set(websiteId, {
+                    process: childProcess,
+                    pid: childProcess.pid,
+                    path: routePath,
+                    port: port,
+                    code: routeCode,
+                    workspace,
+                    startedAt: new Date()
+                });
+                
+                if (chatId) {
+                    storage.lastMentionedWebsite.set(chatId, websiteId);
+                }
+                
+                actionsExecuted.push(`✅ Сайт ${websiteId} запущен в отдельном процессе (PID: ${childProcess.pid}, PORT: ${port})`);
             } catch (error) {
-                actionsExecuted.push('❌ Ошибка создания сайта: ' + error.message);
+                actionsExecuted.push('❌ Ошибка запуска сайта: ' + error.message);
+                console.error('[Website Manager] Detailed error:', error);
             }
         }
     }
@@ -1235,6 +1408,104 @@ process.on('SIGINT', () => {
             }
             
             actionsExecuted.push(botsList);
+        }
+    }
+
+    // 17. STOP_WEBSITE - Kill child website process and destroy workspace
+    const stopWebsiteRegex = /<STOP_WEBSITE>(.*?)<\/STOP_WEBSITE>/g;
+    while ((match = stopWebsiteRegex.exec(aiResponse)) !== null) {
+        let identifier = match[1].trim();
+        
+        if (identifier.toUpperCase() === 'ALL') {
+            identifier = '';
+        }
+        
+        const sitesToStop = [];
+        
+        if (!identifier || identifier === '') {
+            if (match[1].trim().toUpperCase() === 'ALL') {
+                for (const [id, entry] of storage.runningWebsites) {
+                    sitesToStop.push({ id, entry });
+                }
+            } else {
+                actionsExecuted.push('⚠️ Укажите конкретный сайт для остановки (site_id)');
+                continue;
+            }
+        } else {
+            for (const [id, entry] of storage.runningWebsites) {
+                if (id === identifier || entry.path === identifier || String(entry.port) === identifier) {
+                    sitesToStop.push({ id, entry });
+                }
+            }
+        }
+        
+        if (sitesToStop.length === 0) {
+            actionsExecuted.push('❌ Сайт с указанным идентификатором не найден');
+        } else {
+            for (const { id, entry } of sitesToStop) {
+                try {
+                    console.log(`[Website Manager] 🔴 Terminating website ${id} (PID: ${entry.pid})...`);
+                    
+                    if (entry.process && !entry.process.killed) {
+                        entry.process.kill('SIGTERM');
+                        console.log(`[Website Manager] Sent SIGTERM to ${id}`);
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        
+                        if (!entry.process.killed) {
+                            entry.process.kill('SIGKILL');
+                            console.log(`[Website Manager] Sent SIGKILL to ${id}`);
+                            await new Promise(resolve => setTimeout(resolve, 200));
+                        }
+                    }
+                    
+                    if (entry.workspace && fsSync.existsSync(entry.workspace)) {
+                        console.log(`[Website Manager] 🗑️ Removing workspace: ${entry.workspace}`);
+                        try {
+                            await execPromise(`rm -rf "${entry.workspace}"`);
+                            console.log(`[Website Manager] Workspace removed`);
+                        } catch (rmError) {
+                            console.error(`[Website Manager] Failed to remove workspace:`, rmError.message);
+                        }
+                    }
+                    
+                    storage.runningWebsites.delete(id);
+                    actionsExecuted.push(`✅ Сайт ${id} уничтожен (PID: ${entry.pid}, PORT: ${entry.port}, workspace удалён)`);
+                    console.log(`[Website Manager] ✅ Successfully destroyed website ${id}`);
+                } catch (error) {
+                    storage.runningWebsites.delete(id);
+                    actionsExecuted.push(`⚠️ Сайт ${id} удален с ошибкой: ${error.message}`);
+                    console.error(`[Website Manager] Error destroying ${id}:`, error);
+                }
+            }
+        }
+    }
+
+    // 18. LIST_WEBSITES - List running websites
+    if (aiResponse.includes('<LIST_WEBSITES>')) {
+        if (storage.runningWebsites.size === 0) {
+            actionsExecuted.push('📝 Нет запущенных сайтов');
+        } else {
+            let sitesList = '🌐 Запущенные сайты:\n\n';
+            let firstSiteId = null;
+            for (const [siteId, siteData] of storage.runningWebsites) {
+                if (!firstSiteId) firstSiteId = siteId;
+                
+                const uptime = siteData.startedAt ? Math.floor((new Date() - siteData.startedAt) / 1000) : 0;
+                const workspaceInfo = siteData.workspace ? path.basename(siteData.workspace) : 'N/A';
+                sitesList += `  • ${siteId}\n`;
+                sitesList += `    PID: ${siteData.pid || 'N/A'}\n`;
+                sitesList += `    PORT: ${siteData.port}\n`;
+                sitesList += `    Path: ${siteData.path}\n`;
+                sitesList += `    URL: http://localhost:${siteData.port}\n`;
+                sitesList += `    Workspace: ${workspaceInfo}\n`;
+                sitesList += `    Uptime: ${uptime}s\n\n`;
+            }
+            
+            if (firstSiteId && chatId) {
+                storage.lastMentionedWebsite.set(chatId, firstSiteId);
+            }
+            
+            actionsExecuted.push(sitesList);
         }
     }
 
