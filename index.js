@@ -1046,7 +1046,13 @@ process.on('SIGINT', () => {
                     storage.lastMentionedWebsite.set(chatId, websiteId);
                 }
                 
-                actionsExecuted.push(`✅ Сайт ${websiteId} запущен в отдельном процессе (PID: ${childProcess.pid}, PORT: ${port})`);
+                // Determine public URL based on environment
+                const publicUrl = process.env.RENDER_EXTERNAL_URL || 
+                                  process.env.PUBLIC_URL || 
+                                  `http://localhost:${CONFIG.PORT}`;
+                const fullUrl = `${publicUrl}${routePath}`;
+                
+                actionsExecuted.push(`✅ Сайт ${websiteId} запущен в отдельном процессе (PID: ${childProcess.pid}, PORT: ${port})\n🌐 URL: ${fullUrl}`);
             } catch (error) {
                 actionsExecuted.push('❌ Ошибка запуска сайта: ' + error.message);
                 console.error('[Website Manager] Detailed error:', error);
@@ -1799,6 +1805,43 @@ bot.on('message', async (msg) => {
 // 🌐 EXPRESS SERVER
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Proxy middleware for hosted websites
+app.use(async (req, res, next) => {
+    // Check if this request matches any hosted website path
+    for (const [websiteId, websiteData] of storage.runningWebsites) {
+        if (req.path === websiteData.path || req.path.startsWith(websiteData.path + '/')) {
+            try {
+                // Proxy the request to the child process
+                const targetUrl = `http://localhost:${websiteData.port}${req.path}`;
+                console.log(`[Proxy] Routing ${req.path} to port ${websiteData.port}`);
+                
+                const proxyResponse = await axios({
+                    method: req.method,
+                    url: targetUrl,
+                    headers: req.headers,
+                    data: req.body,
+                    validateStatus: () => true // Accept any status code
+                });
+                
+                // Forward the response
+                res.status(proxyResponse.status);
+                Object.entries(proxyResponse.headers).forEach(([key, value]) => {
+                    if (!['transfer-encoding', 'connection'].includes(key.toLowerCase())) {
+                        res.set(key, value);
+                    }
+                });
+                res.send(proxyResponse.data);
+                return;
+            } catch (error) {
+                console.error(`[Proxy] Error routing to ${websiteData.path}:`, error.message);
+                res.status(502).send(`❌ Website temporarily unavailable: ${error.message}`);
+                return;
+            }
+        }
+    }
+    next();
+});
+
 app.get('/', (req, res) => {
     res.send(`
         <html>
@@ -1825,7 +1868,20 @@ app.get('/', (req, res) => {
                 <div class="feature">🤖 Commands: ${storage.customCommands.size}</div>
                 <div class="feature">🔧 Running Bots: ${storage.runningBots.size}</div>
                 <div class="feature">🗄️ Databases: ${storage.databases.size}</div>
-                <div class="feature">🌐 Hosted Sites: ${storage.websites.size}</div>
+                <div class="feature">🌐 Hosted Sites: ${storage.runningWebsites.size}</div>
+                ${storage.runningWebsites.size > 0 ? `
+                <div style="margin-top: 20px; padding: 10px; background: rgba(0,255,0,0.1); border-radius: 5px;">
+                    <h3>🌐 Active Websites:</h3>
+                    ${Array.from(storage.runningWebsites.entries()).map(([id, site]) => `
+                        <div style="margin: 5px 0;">
+                            <a href="${site.path}" style="color: #00ff00; text-decoration: none;">
+                                ➡️ ${site.path}
+                            </a>
+                            <span style="opacity: 0.7; font-size: 0.9em;"> (Port: ${site.port})</span>
+                        </div>
+                    `).join('')}
+                </div>
+                ` : ''}
             </div>
             <div class="info">
                 <h2>🔥 Capabilities:</h2>
