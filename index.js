@@ -20,7 +20,7 @@ const CONFIG = {
     GITHUB_TOKEN: process.env.GITHUB_TOKEN,
     GITHUB_REPO: process.env.GITHUB_REPO || 'mraiko23/doars',
     PORT: process.env.PORT || 3000,
-    AI_MODEL: 'openrouter/sherlock-dash-alpha',
+    AI_MODEL: 'x-ai/grok-4.1-fast',
     MAX_HISTORY: 100,
     TIMEOUT: 120000
 };
