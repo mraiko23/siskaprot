@@ -20,7 +20,7 @@ const CONFIG = {
     GITHUB_TOKEN: process.env.GITHUB_TOKEN,
     GITHUB_REPO: process.env.GITHUB_REPO || 'mraiko23/doars',
     PORT: process.env.PORT || 3000,
-    AI_MODEL: 'x-ai/grok-4.1-fast',
+    AI_MODEL: 'nvidia/nemotron-nano-12b-v2-vl:free',
     MAX_HISTORY: 100,
     TIMEOUT: 120000
 };
