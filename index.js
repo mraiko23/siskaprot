@@ -21,7 +21,7 @@ const CONFIG = {
     GITHUB_REPO: process.env.GITHUB_REPO || 'mraiko23/doars',
     PORT: process.env.PORT || 3000,
     AI_MODEL: 'nvidia/nemotron-nano-12b-v2-vl:free',
-    MAX_HISTORY: 100,
+    MAX_HISTORY: 100000,
     TIMEOUT: 120000
 };
 
